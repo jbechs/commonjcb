@@ -3116,8 +3116,18 @@
       return;
     }
 
-    btn.disabled = true;
+    // If persistent media is already established, rebroadcast immediately.
+    // Do not put roster/network housekeeping on the critical button path.
+    if(persistentMediaReady && stream){
+      startBroadcast();
+      Promise.resolve(refreshRoster())
+        .then(() => reconcilePersistentConnections())
+        .catch(() => {});
+      return;
+    }
 
+    // First activation may still need to acquire/prepare persistent media.
+    btn.disabled = true;
     const ready = await ensurePersistentMedia();
     if(!ready){
       btn.disabled = false;
@@ -3125,12 +3135,11 @@
       return;
     }
 
-    await refreshRoster();
-    reconcilePersistentConnections();
-
-    // Broadcast still works if a late receiver is connecting, but no microphone,
-    // media peer, or existing calls are torn down/recreated here.
+    // Open the gate as soon as media is ready; roster refresh is background-only.
     startBroadcast();
+    Promise.resolve(refreshRoster())
+      .then(() => reconcilePersistentConnections())
+      .catch(() => {});
   });
 
   window.addEventListener("online", () => { lastNetworkEvent = "online"; sampleBroadcastTransportStats(); });
