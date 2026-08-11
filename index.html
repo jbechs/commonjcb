@@ -217,10 +217,25 @@
       margin-bottom:18px;
     }
 
+  
+    /* Portrait-only presentation: hide the app in landscape without touching playback. */
+    #portraitOnlyNotice{ display:none; }
+    @media (orientation: landscape) and (max-height: 600px){
+      body > *:not(#portraitOnlyNotice){ visibility:hidden !important; }
+      #portraitOnlyNotice{
+        display:flex !important; position:fixed; inset:0; z-index:2147483647;
+        align-items:center; justify-content:center; text-align:center;
+        padding:24px; box-sizing:border-box; background:#05070b; color:#fff;
+        font:600 18px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      }
+    }
+
   </style>
 </head>
 
 <body>
+  <div id="portraitOnlyNotice" role="status">Please rotate your phone upright.</div>
+
 
   <main class="container">
     <div class="godMicControls">
@@ -2483,6 +2498,21 @@
 
   const MEDIA_CALL_CONNECT_GRACE_MS = 7000;
 
+  // Diagnostic-only network/WebRTC breadcrumbs. These do not reconnect,
+  // restart media, touch the soundtrack, or change broadcast behavior.
+  let lastPeerEvent = "created";
+  let lastNetworkEvent = navigator.onLine ? "online" : "offline";
+  const networkConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+
+  function networkLabel(){
+    const bits = [navigator.onLine ? "online" : "offline"];
+    if(networkConnection){
+      if(networkConnection.type) bits.push(networkConnection.type);
+      if(networkConnection.effectiveType) bits.push(networkConnection.effectiveType);
+    }
+    return bits.join("/");
+  }
+
   function intercomChannelForStartValue(value){
     const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
     return clean ? `common-v6-${clean}` : null;
@@ -2681,12 +2711,23 @@
     const mb = totalBytesSent / (1024 * 1024);
 
     if(transportDiag){
+      const stateCounts = {};
+      for(const id of receiverIds){
+        const s = mediaCallState(id).state || "unknown";
+        stateCounts[s] = (stateCounts[s] || 0) + 1;
+      }
+      const stateSummary = Object.entries(stateCounts).map(([k,v]) => `${k}:${v}`).join(" ") || "—";
+      const peerSummary = !mediaPeer ? "none" :
+        (mediaPeer.destroyed ? "destroyed" : (mediaPeer.disconnected ? "disconnected" : (mediaPeer.open ? "open" : "opening")));
+
       transportDiag.innerHTML =
         `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · calls ${calls.size} · ` +
         `PC connected ${pcConnected} · sent ${totalPacketsSent} pkts / ${mb.toFixed(2)} MB<br>` +
         `Remote reports ${remoteReports} · loss ${remoteLost} · ` +
         `jitter ${Number.isFinite(avgRemoteJitter) ? Math.round(avgRemoteJitter) + " ms" : "—"} · ` +
-        `RTT ${Number.isFinite(avgRtt) ? Math.round(avgRtt) + " ms" : "—"}`;
+        `RTT ${Number.isFinite(avgRtt) ? Math.round(avgRtt) + " ms" : "—"}<br>` +
+        `WebRTC states ${stateSummary} · Peer ${peerSummary} · peer event ${lastPeerEvent}<br>` +
+        `Network ${networkLabel()} · network event ${lastNetworkEvent}`;
     }
   }
 
@@ -2928,8 +2969,12 @@
             mediaPeer.on("error", done(reject));
           });
 
+          mediaPeer.on("open", () => { lastPeerEvent = "open"; });
+          mediaPeer.on("disconnected", () => { lastPeerEvent = "disconnected"; });
+          mediaPeer.on("close", () => { lastPeerEvent = "close"; });
           mediaPeer.on("error", e => {
             const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
+            lastPeerEvent = `error:${kind}`;
 
             // Once persistent calls exist, signaling warnings are diagnostic-only.
             if(calls.size > 0 && kind === "network"){
@@ -3054,6 +3099,15 @@
     startBroadcast();
   });
 
+  window.addEventListener("online", () => { lastNetworkEvent = "online"; sampleBroadcastTransportStats(); });
+  window.addEventListener("offline", () => { lastNetworkEvent = "offline"; sampleBroadcastTransportStats(); });
+  if(networkConnection && typeof networkConnection.addEventListener === "function"){
+    networkConnection.addEventListener("change", () => {
+      lastNetworkEvent = `change:${networkLabel()}`;
+      sampleBroadcastTransportStats();
+    });
+  }
+
   window.addEventListener("pagehide", () => {
     clearRosterTimers();
     teardownPersistentMedia();
@@ -3063,3 +3117,4 @@
 
 </body>
 </html>
+
