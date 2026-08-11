@@ -2342,10 +2342,13 @@
       const stamp = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
       godMicDiagnostics.textContent = `Intercom — ${msg} · ${stamp}`;
     }
-    const INTERCOM_HOST_ID = "common-god-mic-v1";
+    const INTERCOM_HOST_ID = "common-intercom-experiment-v1";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     let godMicPeer = null;
-    let godMicStream = null;
+    let godMicStream = null;          // raw microphone stream
+    let godMicBroadcastStream = null; // +5 dB processed stream sent to receivers
+    let godMicAudioContext = null;
+    let godMicGainNode = null;
     let godMicCalls = new Map();
     let godMicReceivers = new Map();
     let godMicLibraryPromise = null;
@@ -2353,6 +2356,17 @@
     let godMicMuted = false;
 
     function setGodMicStatus(text){ godMicStatus.textContent = text; }
+
+    function sendGodMicState(conn=null){
+      const payload = {type:"mic-state", live: godMicStarted && !godMicMuted};
+      if(conn){
+        try{ if(conn.open) conn.send(payload); }catch(_){ }
+        return;
+      }
+      for(const c of godMicReceivers.values()){
+        try{ if(c.open) c.send(payload); }catch(_){ }
+      }
+    }
 
     function loadGodMicLibrary(){
       if(window.Peer){ godMicLog("PeerJS already loaded"); return Promise.resolve(); }
@@ -2385,6 +2399,7 @@
       godMicButton.classList.toggle("live", !muted);
       godMicButton.textContent = muted ? "Unmute God Mic" : "Mute God Mic";
       refreshGodMicStatus();
+      sendGodMicState();
     }
 
     async function startGodMic(){
@@ -2397,6 +2412,25 @@
           video:false
         });
         godMicLog("microphone granted");
+
+        // Apply +5 dB to the transmitted god-mic signal only. This Web Audio
+        // graph never contains Common's program audio and cannot affect show sync.
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if(AudioContextClass){
+          godMicAudioContext = new AudioContextClass();
+          if(godMicAudioContext.state === "suspended") await godMicAudioContext.resume();
+          const source = godMicAudioContext.createMediaStreamSource(godMicStream);
+          godMicGainNode = godMicAudioContext.createGain();
+          godMicGainNode.gain.value = Math.pow(10, 5 / 20);
+          const destination = godMicAudioContext.createMediaStreamDestination();
+          source.connect(godMicGainNode).connect(destination);
+          godMicBroadcastStream = destination.stream;
+          godMicLog("microphone boosted +5 dB");
+        }else{
+          godMicBroadcastStream = godMicStream;
+          godMicLog("+5 dB boost unavailable; using raw mic");
+        }
+
         await loadGodMicLibrary();
         godMicLog("opening manager peer…");
         godMicPeer = new Peer(INTERCOM_HOST_ID);
@@ -2412,9 +2446,9 @@
         godMicPeer.on("connection", conn=>{
           godMicLog(`receiver discovered ${conn.peer}`);
           const startCallForReceiver = ()=>{
-            if(!godMicStream || godMicCalls.has(conn.peer)) return;
+            if(!godMicBroadcastStream || godMicCalls.has(conn.peer)) return;
             godMicLog(`placing media call ${conn.peer}`);
-            const call = godMicPeer.call(conn.peer, godMicStream);
+            const call = godMicPeer.call(conn.peer, godMicBroadcastStream);
             godMicCalls.set(conn.peer, call);
             call.on("close", ()=>{ godMicCalls.delete(conn.peer); godMicLog(`media call closed ${conn.peer}`); });
             call.on("error", err=>{ godMicCalls.delete(conn.peer); godMicLog(`media call error ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`); });
@@ -2423,6 +2457,7 @@
             godMicReceivers.set(conn.peer, conn);
             godMicLog(`receiver connection open ${conn.peer}`);
             try{ conn.send({type:"manager-ready"}); }catch(_){ }
+            sendGodMicState(conn);
             startCallForReceiver();
             refreshGodMicStatus();
           });
@@ -2449,6 +2484,9 @@
         });
       }catch(err){
         if(godMicStream){ for(const t of godMicStream.getTracks()) t.stop(); godMicStream=null; }
+        godMicBroadcastStream = null;
+        if(godMicAudioContext){ try{ await godMicAudioContext.close(); }catch(_){ } godMicAudioContext=null; }
+        godMicGainNode = null;
         godMicButton.disabled = false;
         godMicLog(`start failed: ${err && err.message ? err.message : "unknown"}`);
         setGodMicStatus(`Could not start god mic: ${err.message}`);
