@@ -2325,7 +2325,7 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-isolated-a584b0e44c2d';
+  const CHANNEL = 'common-diag-730fc8d668bd';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
   let peer = null, stream = null;
@@ -2352,6 +2352,7 @@
         btn.textContent = "Broadcasting";
       });
       peer.on("connection", conn => {
+        set("Incoming connection seen…");
         conn.on("open", () => {
           const call = peer.call(conn.peer, stream);
           calls.set(conn.peer, call);
