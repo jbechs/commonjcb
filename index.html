@@ -199,7 +199,7 @@
     </div>
     <div class="header">
       <h1>common manager</h1>
-      <div class="subtitle">v4.98 sync engine</div>
+      <div class="subtitle">v5</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -1559,102 +1559,6 @@
         setStatus(reason);
     
 
-    // --- COMMON MANAGER / GOD MIC ----------------------------------------
-    // Separate WebRTC layer. It never reads/writes Common's show clock,
-    // currentTime, playbackRate, calibration, drift correction, hard seeks,
-    // interruption recovery, or playback monitors.
-    const godMicButton = document.getElementById("godMicButton");
-    const godMicStatus = document.getElementById("godMicStatus");
-    const INTERCOM_HOST_ID = "common-god-mic-v1";
-    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
-    let godMicPeer = null;
-    let godMicStream = null;
-    let godMicCalls = new Map();
-    let godMicLibraryPromise = null;
-    let godMicStarted = false;
-    let godMicMuted = false;
-
-    function setGodMicStatus(text){ godMicStatus.textContent = text; }
-
-    function loadGodMicLibrary(){
-      if(window.Peer) return Promise.resolve();
-      if(godMicLibraryPromise) return godMicLibraryPromise;
-      godMicLibraryPromise = new Promise((resolve,reject)=>{
-        const script = document.createElement("script");
-        script.src = INTERCOM_PEERJS_SRC;
-        script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load god-mic network library"));
-        document.head.appendChild(script);
-      });
-      return godMicLibraryPromise;
-    }
-
-    function refreshGodMicStatus(){
-      const n = godMicCalls.size;
-      if(!godMicStarted) return setGodMicStatus("God mic ready.");
-      if(godMicMuted) return setGodMicStatus(`Muted · ${n} receiver${n===1?"":"s"} connected.`);
-      setGodMicStatus(`LIVE · ${n} receiver${n===1?"":"s"} connected.`);
-    }
-
-    function setGodMicMuted(muted){
-      godMicMuted = muted;
-      if(godMicStream){
-        for(const track of godMicStream.getAudioTracks()) track.enabled = !muted;
-      }
-      godMicButton.classList.toggle("muted", muted);
-      godMicButton.classList.toggle("live", !muted);
-      godMicButton.textContent = muted ? "Unmute God Mic" : "Mute God Mic";
-      refreshGodMicStatus();
-    }
-
-    async function startGodMic(){
-      godMicButton.disabled = true;
-      setGodMicStatus("Requesting microphone…");
-      try{
-        godMicStream = await navigator.mediaDevices.getUserMedia({
-          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-          video:false
-        });
-        await loadGodMicLibrary();
-        godMicPeer = new Peer(INTERCOM_HOST_ID);
-        godMicPeer.on("open", ()=>{
-          godMicStarted = true;
-          godMicMuted = false;
-          godMicButton.disabled = false;
-          godMicButton.classList.add("live");
-          godMicButton.textContent = "Mute God Mic";
-          refreshGodMicStatus();
-        });
-        godMicPeer.on("connection", conn=>{
-          conn.on("open", ()=>{
-            if(!godMicStream) return;
-            const call = godMicPeer.call(conn.peer, godMicStream);
-            godMicCalls.set(conn.peer, call);
-            call.on("close", ()=>{ godMicCalls.delete(conn.peer); refreshGodMicStatus(); });
-            call.on("error", ()=>{ godMicCalls.delete(conn.peer); refreshGodMicStatus(); });
-            refreshGodMicStatus();
-          });
-        });
-        godMicPeer.on("error", err=>{
-          godMicButton.disabled = false;
-          if(err && err.type === "unavailable-id"){
-            setGodMicStatus("God-mic channel already in use on another manager.");
-          }else{
-            setGodMicStatus(`God mic error: ${err.type || err.message || "unknown"}`);
-          }
-        });
-      }catch(err){
-        if(godMicStream){ for(const t of godMicStream.getTracks()) t.stop(); godMicStream=null; }
-        godMicButton.disabled = false;
-        setGodMicStatus(`Could not start god mic: ${err.message}`);
-      }
-    }
-
-    godMicButton.addEventListener("click", ()=>{
-      if(!godMicStarted) return startGodMic();
-      setGodMicMuted(!godMicMuted);
-    });
 
     updateTransport();
         updateDriftStats();
@@ -2425,6 +2329,103 @@
     });
 
 
+
+    // --- COMMON MANAGER / GOD MIC ----------------------------------------
+    // Separate WebRTC layer. It never reads/writes Common's show clock,
+    // currentTime, playbackRate, calibration, drift correction, hard seeks,
+    // interruption recovery, or playback monitors.
+    const godMicButton = document.getElementById("godMicButton");
+    const godMicStatus = document.getElementById("godMicStatus");
+    const INTERCOM_HOST_ID = "common-god-mic-v1";
+    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
+    let godMicPeer = null;
+    let godMicStream = null;
+    let godMicCalls = new Map();
+    let godMicLibraryPromise = null;
+    let godMicStarted = false;
+    let godMicMuted = false;
+
+    function setGodMicStatus(text){ godMicStatus.textContent = text; }
+
+    function loadGodMicLibrary(){
+      if(window.Peer) return Promise.resolve();
+      if(godMicLibraryPromise) return godMicLibraryPromise;
+      godMicLibraryPromise = new Promise((resolve,reject)=>{
+        const script = document.createElement("script");
+        script.src = INTERCOM_PEERJS_SRC;
+        script.async = true;
+        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
+        script.onerror = ()=> reject(new Error("Could not load god-mic network library"));
+        document.head.appendChild(script);
+      });
+      return godMicLibraryPromise;
+    }
+
+    function refreshGodMicStatus(){
+      const n = godMicCalls.size;
+      if(!godMicStarted) return setGodMicStatus("God mic ready.");
+      if(godMicMuted) return setGodMicStatus(`Muted · ${n} receiver${n===1?"":"s"} connected.`);
+      setGodMicStatus(`LIVE · ${n} receiver${n===1?"":"s"} connected.`);
+    }
+
+    function setGodMicMuted(muted){
+      godMicMuted = muted;
+      if(godMicStream){
+        for(const track of godMicStream.getAudioTracks()) track.enabled = !muted;
+      }
+      godMicButton.classList.toggle("muted", muted);
+      godMicButton.classList.toggle("live", !muted);
+      godMicButton.textContent = muted ? "Unmute God Mic" : "Mute God Mic";
+      refreshGodMicStatus();
+    }
+
+    async function startGodMic(){
+      godMicButton.disabled = true;
+      setGodMicStatus("Requesting microphone…");
+      try{
+        godMicStream = await navigator.mediaDevices.getUserMedia({
+          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
+          video:false
+        });
+        await loadGodMicLibrary();
+        godMicPeer = new Peer(INTERCOM_HOST_ID);
+        godMicPeer.on("open", ()=>{
+          godMicStarted = true;
+          godMicMuted = false;
+          godMicButton.disabled = false;
+          godMicButton.classList.add("live");
+          godMicButton.textContent = "Mute God Mic";
+          refreshGodMicStatus();
+        });
+        godMicPeer.on("connection", conn=>{
+          conn.on("open", ()=>{
+            if(!godMicStream) return;
+            const call = godMicPeer.call(conn.peer, godMicStream);
+            godMicCalls.set(conn.peer, call);
+            call.on("close", ()=>{ godMicCalls.delete(conn.peer); refreshGodMicStatus(); });
+            call.on("error", ()=>{ godMicCalls.delete(conn.peer); refreshGodMicStatus(); });
+            refreshGodMicStatus();
+          });
+        });
+        godMicPeer.on("error", err=>{
+          godMicButton.disabled = false;
+          if(err && err.type === "unavailable-id"){
+            setGodMicStatus("God-mic channel already in use on another manager.");
+          }else{
+            setGodMicStatus(`God mic error: ${err.type || err.message || "unknown"}`);
+          }
+        });
+      }catch(err){
+        if(godMicStream){ for(const t of godMicStream.getTracks()) t.stop(); godMicStream=null; }
+        godMicButton.disabled = false;
+        setGodMicStatus(`Could not start god mic: ${err.message}`);
+      }
+    }
+
+    godMicButton.addEventListener("click", ()=>{
+      if(!godMicStarted) return startGodMic();
+      setGodMicMuted(!godMicMuted);
+    });
 
     updateTransport();
     updateDriftStats();
