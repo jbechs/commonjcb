@@ -2325,12 +2325,14 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-presence-650640011170';
+  const PRESENCE_CHANNEL = 'common-presence-3651686aed';
+  const MEDIA_CHANNEL = 'common-presence-3651686aed-media';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
   const diag = document.getElementById("godMicDiagnostics");
 
-  let peer = null;
+  let presencePeer = null;
+  let mediaPeer = null;
   let stream = null;
   let broadcasting = false;
   const receivers = new Map();
@@ -2344,109 +2346,98 @@
   const receiverCountText = () =>
     `${receivers.size} receiver${receivers.size === 1 ? "" : "s"} connected`;
 
-  const updateIdleStatus = () => {
+  const updateReady = () => {
     if(!broadcasting) set(`Broadcast ready · ${receiverCountText()}`);
-  };
-
-  const placeCall = conn => {
-    if(!broadcasting || !stream || !peer || !conn || !conn.open) return;
-    if(calls.has(conn.peer)) return;
-
-    const call = peer.call(conn.peer, stream);
-    calls.set(conn.peer, call);
-    set(`LIVE · ${receiverCountText()}`);
-
-    call.on("close", () => {
-      calls.delete(conn.peer);
-      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
-    });
-    call.on("error", () => {
-      calls.delete(conn.peer);
-      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
-    });
   };
 
   const registerReceiver = conn => {
     receivers.set(conn.peer, conn);
-    updateIdleStatus();
+    updateReady();
 
     conn.on("open", () => {
       receivers.set(conn.peer, conn);
-      updateIdleStatus();
       try{ conn.send({type:"manager-ready"}); }catch(_e){}
-      if(broadcasting) placeCall(conn);
+      updateReady();
     });
 
     conn.on("close", () => {
       receivers.delete(conn.peer);
-      const call = calls.get(conn.peer);
-      if(call){ try{ call.close(); }catch(_e){} }
-      calls.delete(conn.peer);
-      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
-      else updateIdleStatus();
+      updateReady();
     });
 
     conn.on("error", () => {
       if(!conn.open) receivers.delete(conn.peer);
-      if(!broadcasting) updateIdleStatus();
+      updateReady();
     });
   };
 
-  const openManagerPresence = () => {
-    if(!window.Peer){
-      set("PeerJS unavailable");
-      return;
-    }
+  const openPresence = () => {
+    if(!window.Peer){ set("PeerJS unavailable"); return; }
     set("Opening manager channel…");
-    peer = new Peer(CHANNEL);
+    presencePeer = new Peer(PRESENCE_CHANNEL);
 
-    peer.on("open", () => {
-      updateIdleStatus();
+    presencePeer.on("open", () => {
+      updateReady();
       btn.disabled = false;
     });
-
-    peer.on("connection", registerReceiver);
-
-    peer.on("disconnected", () => {
-      set("Manager reconnecting…");
-      try{ peer.reconnect(); }catch(_e){}
+    presencePeer.on("connection", registerReceiver);
+    presencePeer.on("disconnected", () => {
+      // Presence signaling may wobble when iOS activates the microphone.
+      // Do not use this peer for media; just try to restore roster signaling.
+      if(!broadcasting) set("Manager presence reconnecting…");
+      try{ presencePeer.reconnect(); }catch(_e){}
     });
-
-    peer.on("error", e => {
-      if(e && e.type === "unavailable-id"){
-        set("Manager channel already in use");
-      }else{
-        set("Manager peer error: " + (e.type || e.message || "unknown"));
-      }
+    presencePeer.on("error", e => {
+      if(e && e.type === "unavailable-id") set("Manager channel already in use");
+      else if(!broadcasting) set("Manager presence error: " + (e.type || e.message || "unknown"));
     });
+  };
+
+  const placeMediaCalls = () => {
+    receivers.forEach((conn, receiverId) => {
+      if(calls.has(receiverId)) return;
+      try{
+        const call = mediaPeer.call(receiverId, stream);
+        calls.set(receiverId, call);
+        call.on("close", () => calls.delete(receiverId));
+        call.on("error", () => calls.delete(receiverId));
+      }catch(_e){}
+    });
+    set(`LIVE · ${receiverCountText()}`);
   };
 
   btn.disabled = true;
-  openManagerPresence();
+  openPresence();
 
   btn.addEventListener("click", async () => {
-    if(!peer || !peer.open) {
-      set("Manager channel not ready yet");
-      return;
-    }
     if(broadcasting) return;
 
     btn.disabled = true;
     set("Requesting microphone…");
 
     try{
+      // Acquire mic FIRST. This is the ordering already proven to work.
       stream = await navigator.mediaDevices.getUserMedia({
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
         video:false
       });
-      broadcasting = true;
-      btn.textContent = "Broadcasting";
-      receivers.forEach(conn => placeCall(conn));
-      set(`LIVE · ${receiverCountText()}`);
+
+      set("Opening broadcast media channel…");
+      mediaPeer = new Peer(MEDIA_CHANNEL);
+
+      mediaPeer.on("open", () => {
+        broadcasting = true;
+        btn.textContent = "Broadcasting";
+        placeMediaCalls();
+      });
+
+      mediaPeer.on("error", e => {
+        set("Broadcast peer error: " + (e.type || e.message || "unknown"));
+        btn.disabled = false;
+      });
     }catch(e){
       set("Mic error: " + (e.message || e));
       btn.disabled = false;
-      return;
     }
   });
 })();
