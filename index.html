@@ -216,6 +216,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
+      <div id="godMicDiagnostics" class="debug" style="margin-top:10px; white-space:pre-wrap;">Intercom — dormant</div>
     </div>
 
 
@@ -2336,6 +2337,11 @@
     // interruption recovery, or playback monitors.
     const godMicButton = document.getElementById("godMicButton");
     const godMicStatus = document.getElementById("godMicStatus");
+    const godMicDiagnostics = document.getElementById("godMicDiagnostics");
+    function godMicLog(msg){
+      const stamp = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+      godMicDiagnostics.textContent = `Intercom — ${msg} · ${stamp}`;
+    }
     const INTERCOM_HOST_ID = "common-god-mic-v1";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     let godMicPeer = null;
@@ -2349,14 +2355,15 @@
     function setGodMicStatus(text){ godMicStatus.textContent = text; }
 
     function loadGodMicLibrary(){
-      if(window.Peer) return Promise.resolve();
+      if(window.Peer){ godMicLog("PeerJS already loaded"); return Promise.resolve(); }
       if(godMicLibraryPromise) return godMicLibraryPromise;
+      godMicLog("loading PeerJS…");
       godMicLibraryPromise = new Promise((resolve,reject)=>{
         const script = document.createElement("script");
         script.src = INTERCOM_PEERJS_SRC;
         script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load god-mic network library"));
+        script.onload = ()=> { if(window.Peer){ godMicLog("PeerJS loaded"); resolve(); } else { godMicLog("PeerJS unavailable"); reject(new Error("PeerJS unavailable")); } };
+        script.onerror = ()=> { godMicLog("PeerJS load failed"); reject(new Error("Could not load god-mic network library")); };
         document.head.appendChild(script);
       });
       return godMicLibraryPromise;
@@ -2383,14 +2390,18 @@
     async function startGodMic(){
       godMicButton.disabled = true;
       setGodMicStatus("Requesting microphone…");
+      godMicLog("requesting microphone");
       try{
         godMicStream = await navigator.mediaDevices.getUserMedia({
           audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
           video:false
         });
+        godMicLog("microphone granted");
         await loadGodMicLibrary();
+        godMicLog("opening manager peer…");
         godMicPeer = new Peer(INTERCOM_HOST_ID);
-        godMicPeer.on("open", ()=>{
+        godMicPeer.on("open", id=>{
+          godMicLog(`manager peer open ${id}`);
           godMicStarted = true;
           godMicMuted = false;
           godMicButton.disabled = false;
@@ -2399,15 +2410,18 @@
           refreshGodMicStatus();
         });
         godMicPeer.on("connection", conn=>{
+          godMicLog(`receiver discovered ${conn.peer}`);
           const startCallForReceiver = ()=>{
             if(!godMicStream || godMicCalls.has(conn.peer)) return;
+            godMicLog(`placing media call ${conn.peer}`);
             const call = godMicPeer.call(conn.peer, godMicStream);
             godMicCalls.set(conn.peer, call);
-            call.on("close", ()=>{ godMicCalls.delete(conn.peer); });
-            call.on("error", ()=>{ godMicCalls.delete(conn.peer); });
+            call.on("close", ()=>{ godMicCalls.delete(conn.peer); godMicLog(`media call closed ${conn.peer}`); });
+            call.on("error", err=>{ godMicCalls.delete(conn.peer); godMicLog(`media call error ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`); });
           };
           conn.on("open", ()=>{
             godMicReceivers.set(conn.peer, conn);
+            godMicLog(`receiver connection open ${conn.peer}`);
             try{ conn.send({type:"manager-ready"}); }catch(_){ }
             startCallForReceiver();
             refreshGodMicStatus();
@@ -2426,6 +2440,7 @@
         });
         godMicPeer.on("error", err=>{
           godMicButton.disabled = false;
+          godMicLog(`manager peer error: ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`);
           if(err && err.type === "unavailable-id"){
             setGodMicStatus("God-mic channel already in use on another manager.");
           }else{
@@ -2435,6 +2450,7 @@
       }catch(err){
         if(godMicStream){ for(const t of godMicStream.getTracks()) t.stop(); godMicStream=null; }
         godMicButton.disabled = false;
+        godMicLog(`start failed: ${err && err.message ? err.message : "unknown"}`);
         setGodMicStatus(`Could not start god mic: ${err.message}`);
       }
     }
