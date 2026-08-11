@@ -164,7 +164,7 @@
     }
     input, input[type="datetime-local"]{ background:#3b1116 !important; }
     .diagnosticsToggle{ background:#240507 !important; color:#5c1b22 !important; }
-    .godMicControls{ display:grid; gap:8px; margin-bottom:4px; }
+    .godMicControls{ display:grid; gap:8px; margin-bottom:32px; }
     .godMicButton{
       font-size:1.08rem; padding:14px 18px; min-width:190px;
       background:#fff; color:#2b0508;
@@ -201,7 +201,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="godMicDiagnostics" class="timingProbe">Intercom — dormant</div>
+      <div id="godMicDiagnostics" class="timingProbe">Intercom — Broadcast ready</div>
     </div>
 
 
@@ -2330,7 +2330,11 @@
   const status = document.getElementById("godMicStatus");
   let peer = null, stream = null;
   const calls = new Map();
-  const set = t => status.textContent = t;
+  const diag = document.getElementById("godMicDiagnostics");
+  const set = t => {
+    status.textContent = t;
+    if(diag) diag.textContent = "Intercom — " + t;
+  };
   btn.addEventListener("click", async () => {
     if(peer) return;
     btn.disabled = true;
