@@ -2409,6 +2409,19 @@
   let transportStatsTimer = null;
   const begin = document.getElementById("playButton");
   const startField = document.getElementById("startTime");
+  const programAudio = document.getElementById("audio");
+  if(programAudio){
+    programAudio.addEventListener("ended", () => {
+      try{
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(SESSION_START_KEY);
+        sessionStorage.removeItem(MANAGER_ARMED_KEY);
+      }catch(_e){}
+      sessionId = null;
+      if(sessionDiag) sessionDiag.textContent = "Session: —";
+      if(!broadcasting) set("Show ended · refresh for next session");
+    });
+  }
   let intercomStartDirty = false;
   if(startField){
     const markNewShow = () => {
