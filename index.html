@@ -2409,53 +2409,59 @@
     }
     godMicButton.addEventListener("click", startGodMic);
 
-    // TEMPORARY EXACT GOLDEN BROADCAST TEST
-    let manualBroadcastPeer = null;
-    let manualBroadcastStream = null;
-    let manualBroadcastCalls = new Map();
-    godMicButton.addEventListener("click", async (ev)=>{
-      ev.stopImmediatePropagation();
-      if(manualBroadcastPeer) return;
-      godMicButton.disabled = true;
-      setGodMicStatus("Requesting microphone…");
-      try{
-        manualBroadcastStream = await navigator.mediaDevices.getUserMedia({
-          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-          video:false
-        });
-        setGodMicStatus("Opening broadcast channel…");
-        manualBroadcastPeer = new Peer(INTERCOM_HOST_ID);
-        manualBroadcastPeer.on("open", ()=>{
-          setGodMicStatus("LIVE · 0 receivers connected");
-          godMicButton.textContent = "Broadcasting";
-          godMicButton.disabled = true;
-        });
-        manualBroadcastPeer.on("connection", conn=>{
-          conn.on("open", ()=>{
-            try{ conn.send({type:"listener-ready"}); }catch(_err){}
-            const call = manualBroadcastPeer.call(conn.peer, manualBroadcastStream);
-            manualBroadcastCalls.set(conn.peer, call);
-            try{ conn.send({type:"mic-state", live:true}); }catch(_err){}
-            setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
-            call.on("close", ()=>{
-              manualBroadcastCalls.delete(conn.peer);
-              setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
-            });
-          });
-        });
-        manualBroadcastPeer.on("error", err=>{
-          setGodMicStatus("Peer error: " + (err.type || err.message || "unknown"));
-          godMicButton.disabled = false;
-        });
-      }catch(err){
-        setGodMicStatus("Mic error: " + (err.message || err));
-        godMicButton.disabled = false;
-      }
-    }, true);
 
     updateTransport();
     updateDriftStats();
     updateTimingProbe();
   </script>
+
+<div id="isoIntercomRed" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
+  <button id="isoBroadcastBtn" type="button" style="background:#000;color:#fff;border:1px solid rgba(255,255,255,.22)">Broadcast</button>
+  <div id="isoRedStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Broadcast ready</div>
+</div>
+<script>
+(() => {
+  const CHANNEL = 'common-isolated-a584b0e44c2d';
+  const btn = document.getElementById("isoBroadcastBtn");
+  const status = document.getElementById("isoRedStatus");
+  let peer = null, stream = null;
+  const calls = new Map();
+  const set = t => status.textContent = t;
+  btn.addEventListener("click", async () => {
+    if(peer) return;
+    btn.disabled = true;
+    set("Requesting microphone…");
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
+        video:false
+      });
+      if(!window.Peer) throw new Error("PeerJS unavailable");
+      set("Opening broadcast channel…");
+      peer = new Peer(CHANNEL);
+      peer.on("open", () => {
+        set("LIVE · 0 receivers connected");
+        btn.textContent = "Broadcasting";
+      });
+      peer.on("connection", conn => {
+        conn.on("open", () => {
+          const call = peer.call(conn.peer, stream);
+          calls.set(conn.peer, call);
+          set(`LIVE · ${calls.size} receiver${calls.size===1?"":"s"} connected`);
+          call.on("close", () => {
+            calls.delete(conn.peer);
+            set(`LIVE · ${calls.size} receiver${calls.size===1?"":"s"} connected`);
+          });
+        });
+      });
+      peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); btn.disabled=false; });
+    }catch(e){
+      set("Mic error: " + (e.message || e));
+      btn.disabled=false;
+    }
+  });
+})();
+</script>
+
 </body>
 </html>
