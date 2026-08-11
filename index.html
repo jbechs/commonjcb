@@ -2474,6 +2474,9 @@
   let broadcasting = false;
   let persistentMediaReady = false;
   let persistentMediaPromise = null;
+  let persistentReconcileTimer = null;
+  let mediaCallAttempts = 0;
+  let mediaCallCreateErrors = 0;
   const calls = new Map();
   const controls = new Map();
 
@@ -2566,24 +2569,7 @@
       receiverIds = nextIds;
 
       if(persistentMediaReady && mediaPeer && mediaPeer.open && stream){
-        receiverIds.forEach(id => {
-          if(!calls.has(id)) placeCall(id);
-          if(!controls.has(id)) placeControl(id);
-        });
-
-        // Retire connections to receivers that have genuinely left the Cloudflare roster.
-        for(const [id, c] of calls){
-          if(!receiverIds.has(id)){
-            try{ c.close(); }catch(_e){}
-            calls.delete(id);
-          }
-        }
-        for(const [id, c] of controls){
-          if(!receiverIds.has(id)){
-            try{ c.close(); }catch(_e){}
-            controls.delete(id);
-          }
-        }
+        reconcilePersistentConnections();
       }
       updateReady();
       if(broadcasting) set(`LIVE · ${receiverCountText()}`);
@@ -2634,7 +2620,7 @@
       btn.disabled = false;
       await refreshRoster();
       await ensurePersistentMedia();
-      placeAllPersistentConnections();
+      reconcilePersistentConnections();
       broadcastStateToAll();
       clearRosterTimers();
       heartbeatTimer = setInterval(() => registerManager().catch(()=>{}), HEARTBEAT_MS);
@@ -2734,29 +2720,82 @@
   }
 
   function placeCall(receiverId){
-    if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return;
-    if(calls.has(receiverId)) return;
+    if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return false;
+    if(calls.has(receiverId)) return true;
+
+    mediaCallAttempts += 1;
 
     try{
       const c = mediaPeer.call(receiverId, stream);
+      if(!c){
+        mediaCallCreateErrors += 1;
+        return false;
+      }
+
       calls.set(receiverId, c);
 
-      c.on("close", () => calls.delete(receiverId));
-      c.on("error", () => {
-        calls.delete(receiverId);
-        if(diag){
-          diag.textContent =
-            `Intercom — ${broadcasting ? "LIVE" : "ready"} · one media call retrying`;
-        }
+      c.on("close", () => {
+        if(calls.get(receiverId) === c) calls.delete(receiverId);
       });
-    }catch(_e){}
+
+      c.on("error", () => {
+        if(calls.get(receiverId) === c) calls.delete(receiverId);
+      });
+
+      return true;
+    }catch(_e){
+      mediaCallCreateErrors += 1;
+      return false;
+    }
   }
 
   function placeAllPersistentConnections(){
     receiverIds.forEach(id => {
-      placeCall(id);
-      placeControl(id);
+      if(!calls.has(id)) placeCall(id);
+      if(!controls.has(id)) placeControl(id);
     });
+  }
+
+  function updatePersistentReadyDiagnostic(){
+    if(!transportDiag) return;
+    transportDiag.textContent =
+      `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · ` +
+      `${calls.size}/${receiverIds.size} media calls · ` +
+      `${controls.size}/${receiverIds.size} controls · ` +
+      `attempts ${mediaCallAttempts} · create errors ${mediaCallCreateErrors}`;
+  }
+
+  function reconcilePersistentConnections(){
+    if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return;
+
+    placeAllPersistentConnections();
+
+    // Remove departed receivers, but leave active show peers otherwise untouched.
+    for(const [id, c] of calls){
+      if(!receiverIds.has(id)){
+        try{ c.close(); }catch(_e){}
+        calls.delete(id);
+      }
+    }
+    for(const [id, c] of controls){
+      if(!receiverIds.has(id)){
+        try{ c.close(); }catch(_e){}
+        controls.delete(id);
+      }
+    }
+
+    updatePersistentReadyDiagnostic();
+  }
+
+  function startPersistentReconcile(){
+    if(persistentReconcileTimer) clearInterval(persistentReconcileTimer);
+    reconcilePersistentConnections();
+    persistentReconcileTimer = setInterval(reconcilePersistentConnections, 1500);
+  }
+
+  function stopPersistentReconcile(){
+    if(persistentReconcileTimer) clearInterval(persistentReconcileTimer);
+    persistentReconcileTimer = null;
   }
 
   function setMicEnabled(enabled){
@@ -2816,7 +2855,7 @@
         }
 
         persistentMediaReady = true;
-        placeAllPersistentConnections();
+        startPersistentReconcile();
         startBroadcastTransportStats();
         updateReady();
         return true;
@@ -2866,6 +2905,7 @@
     broadcasting = false;
     persistentMediaReady = false;
     persistentMediaPromise = null;
+    stopPersistentReconcile();
 
     controls.forEach(c => { try{ c.close(); }catch(_e){} });
     controls.clear();
@@ -2918,7 +2958,10 @@
     }
 
     await refreshRoster();
-    placeAllPersistentConnections();
+    reconcilePersistentConnections();
+
+    // Broadcast still works if a late receiver is connecting, but no microphone,
+    // media peer, or existing calls are torn down/recreated here.
     startBroadcast();
   });
 
