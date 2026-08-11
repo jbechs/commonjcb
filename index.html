@@ -2329,6 +2329,51 @@
 (() => {
   const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
   const SESSION_KEY = 'common-v6-intercom-session';
+
+  const SESSION_START_KEY = "common-v6-intercom-start-value";
+  const SESSION_EARLY_MS = 10 * 60 * 1000;
+  const SESSION_LATE_MS = 30 * 60 * 1000;
+
+  function parseSessionStartFromId(id){
+    const m = String(id || "").match(/^common-v6-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})$/);
+    if(!m) return null;
+    const [, y, mo, d, h, mi] = m;
+    return `${y}-${mo}-${d}T${h}:${mi}`;
+  }
+
+  function storedSessionSnapshot(){
+    let id = null;
+    let startValue = null;
+    try{
+      id = sessionStorage.getItem(SESSION_KEY);
+      startValue = sessionStorage.getItem(SESSION_START_KEY);
+    }catch(_e){}
+    if(id && !startValue) startValue = parseSessionStartFromId(id);
+    return {id, startValue};
+  }
+
+  function storedSessionIsLive(snapshot){
+    if(!snapshot || !snapshot.id || !snapshot.startValue) return false;
+    const startMs = new Date(snapshot.startValue).getTime();
+    if(!Number.isFinite(startMs)) return false;
+    const now = Date.now();
+    return now >= (startMs - SESSION_EARLY_MS) &&
+           now <= (startMs + SESSION_LATE_MS);
+  }
+
+  function clearStoredIntercomSession(){
+    try{
+      sessionStorage.removeItem(SESSION_KEY);
+      sessionStorage.removeItem(SESSION_START_KEY);
+    }catch(_e){}
+  }
+
+  function saveIntercomSession(id, startValue){
+    try{
+      sessionStorage.setItem(SESSION_KEY, id);
+      sessionStorage.setItem(SESSION_START_KEY, startValue);
+    }catch(_e){}
+  }
   const HEARTBEAT_MS = 8000;
   const POLL_MS = 2000;
 
@@ -2340,6 +2385,11 @@
   let transportStatsTimer = null;
   const begin = document.getElementById("playButton");
   const startField = document.getElementById("startTime");
+  let intercomStartDirty = false;
+  if(startField){
+    startField.addEventListener("input", () => { intercomStartDirty = true; });
+    startField.addEventListener("change", () => { intercomStartDirty = true; });
+  }
 
   let sessionId = null;
   let managerInstanceId = null;
@@ -2360,21 +2410,41 @@
 
   function freezeSession(value){
     const requested = intercomChannelForStartValue(value);
-    let frozen = null;
-    try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
-    sessionId = frozen || requested;
-    if(sessionId && !frozen){
-      try{ sessionStorage.setItem(SESSION_KEY, sessionId); }catch(_e){}
+    const snapshot = storedSessionSnapshot();
+
+    if(intercomStartDirty){
+      sessionId = requested;
+      if(sessionId) saveIntercomSession(sessionId, value);
+    }else if(storedSessionIsLive(snapshot)){
+      sessionId = snapshot.id;
+      if(startField && snapshot.startValue && startField.value !== snapshot.startValue){
+        startField.value = snapshot.startValue;
+      }
+      if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
+    }else{
+      clearStoredIntercomSession();
+      sessionId = requested;
+      if(sessionId) saveIntercomSession(sessionId, value);
     }
+
     if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
     return sessionId;
   }
 
   try{
-    const stored = sessionStorage.getItem(SESSION_KEY);
-    if(stored){
-      sessionId = stored;
-      if(sessionDiag) sessionDiag.textContent = "Session: " + stored;
+    const snapshot = storedSessionSnapshot();
+    if(storedSessionIsLive(snapshot)){
+      sessionId = snapshot.id;
+      if(startField && snapshot.startValue){
+        startField.value = snapshot.startValue;
+      }
+      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id;
+    }else{
+      clearStoredIntercomSession();
+      sessionId = null;
+      const proposed = intercomChannelForStartValue(startField && startField.value);
+      if(sessionDiag) sessionDiag.textContent =
+        "Session: " + (proposed || "—") + " (proposed)";
     }
   }catch(_e){}
 
