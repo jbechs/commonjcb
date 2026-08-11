@@ -2486,16 +2486,19 @@
     const requested = intercomChannelForStartValue(value);
     const snapshot = storedSessionSnapshot();
 
-    if(intercomStartDirty){
-      sessionId = requested;
-      if(sessionId) saveIntercomSession(sessionId, value);
-    }else if(storedSessionIsLive(snapshot)){
+    let wasArmed = false;
+    try{ wasArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1"; }catch(_e){}
+
+    // Visible Start Time is authoritative. Only a genuine mid-show rejoin may
+    // override it with a previously armed session.
+    if(wasArmed && storedSessionIsActuallyUnderway(snapshot)){
       sessionId = snapshot.id;
       if(startField && snapshot.startValue && startField.value !== snapshot.startValue){
         startField.value = snapshot.startValue;
       }
       if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
     }else{
+      // Setup/new run: what the audience/operator sees is what Begin will use.
       clearStoredIntercomSession();
       sessionId = requested;
       if(sessionId) saveIntercomSession(sessionId, value);
@@ -2590,6 +2593,12 @@
 
   async function armManager(){
     if(armed) return;
+    try{
+      const snapshot = storedSessionSnapshot();
+      if(snapshot.startValue && startField && startField.value !== snapshot.startValue){
+        sessionStorage.removeItem(MANAGER_ARMED_KEY);
+      }
+    }catch(_e){}
     const frozen = freezeSession(startField && startField.value);
     if(!frozen){
       set("Manager session needs a Start Time");
