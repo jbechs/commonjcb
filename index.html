@@ -172,6 +172,28 @@
     .godMicButton.live{ background:#000; color:#fff; }
     .godMicStatus{ font-size:.82rem; color:#d8aeb2; min-height:1.2em; }
 
+  
+    /* v6 Manager compact viewport polish */
+    body{
+      min-height:100dvh;
+      box-sizing:border-box;
+      align-items:start;
+      justify-items:center;
+      padding:18px 0 10px;
+      overflow-x:hidden;
+    }
+    .container{
+      gap:12px;
+      margin:0 auto;
+      padding-bottom:4px;
+    }
+    .godMicControls{
+      margin-bottom:24px;
+    }
+    .header{
+      margin-bottom:18px;
+    }
+
   </style>
 </head>
 
@@ -2329,6 +2351,7 @@
 (() => {
   const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
   const SESSION_KEY = 'common-v6-intercom-session';
+  const MANAGER_ARMED_KEY = "common-v6-manager-armed";
 
   const SESSION_START_KEY = "common-v6-intercom-start-value";
   const SESSION_EARLY_MS = 10 * 60 * 1000;
@@ -2365,6 +2388,7 @@
     try{
       sessionStorage.removeItem(SESSION_KEY);
       sessionStorage.removeItem(SESSION_START_KEY);
+      sessionStorage.removeItem(MANAGER_ARMED_KEY);
     }catch(_e){}
   }
 
@@ -2387,8 +2411,12 @@
   const startField = document.getElementById("startTime");
   let intercomStartDirty = false;
   if(startField){
-    startField.addEventListener("input", () => { intercomStartDirty = true; });
-    startField.addEventListener("change", () => { intercomStartDirty = true; });
+    const markNewShow = () => {
+      intercomStartDirty = true;
+      try{ sessionStorage.removeItem(MANAGER_ARMED_KEY); }catch(_e){}
+    };
+    startField.addEventListener("input", markNewShow);
+    startField.addEventListener("change", markNewShow);
   }
 
   let sessionId = null;
@@ -2433,13 +2461,18 @@
 
   try{
     const snapshot = storedSessionSnapshot();
-    if(storedSessionIsLive(snapshot)){
+    const wasManagerArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1";
+
+    if(wasManagerArmed && storedSessionIsLive(snapshot)){
+      // Genuine Manager refresh/rejoin: restore the show that had actually begun.
       sessionId = snapshot.id;
       if(startField && snapshot.startValue){
         startField.value = snapshot.startValue;
       }
-      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id;
+      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
     }else{
+      // Ordinary refresh before Manager Begin: do NOT inherit an old room.
+      // Leave Common's existing >60-second whole-minute default untouched.
       clearStoredIntercomSession();
       sessionId = null;
       const proposed = intercomChannelForStartValue(startField && startField.value);
@@ -2524,6 +2557,7 @@
     try{
       await registerManager();
       armed = true;
+      try{ sessionStorage.setItem(MANAGER_ARMED_KEY, "1"); }catch(_e){}
       btn.disabled = false;
       await refreshRoster();
       clearRosterTimers();
