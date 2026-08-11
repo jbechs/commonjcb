@@ -2497,6 +2497,7 @@
   const controls = new Map();
 
   const MEDIA_CALL_CONNECT_GRACE_MS = 30000;
+  // Experiment: once a call has ever been healthy, transient disconnects do not trigger replacement.
 
   // Network/WebRTC breadcrumbs plus bounded signaling recovery.
   // Recovery is confined to PeerJS signaling; it never touches the soundtrack,
@@ -2781,6 +2782,8 @@
       callHealth.set(receiverId, {
         createdAt: Date.now(),
         connectedAt: null,
+        lastHealthyAt: null,
+        everHealthy: false,
         lastState: "created"
       });
 
@@ -2792,9 +2795,12 @@
 
           const state = pc.connectionState || pc.iceConnectionState || "unknown";
           h.lastState = state;
-          if((pc.connectionState === "connected" || pc.iceConnectionState === "connected" ||
-              pc.iceConnectionState === "completed") && !h.connectedAt){
-            h.connectedAt = Date.now();
+          if(pc.connectionState === "connected" || pc.iceConnectionState === "connected" ||
+             pc.iceConnectionState === "completed"){
+            const healthyNow = Date.now();
+            if(!h.connectedAt) h.connectedAt = healthyNow;
+            h.lastHealthyAt = healthyNow;
+            h.everHealthy = true;
           }
         };
 
@@ -2841,15 +2847,23 @@
       iceState === "closed";
 
     const age = h ? now - h.createdAt : 0;
-    // Never age-retire an in-progress media call merely because PeerJS signaling
-    // is temporarily disconnected. Give cross-network ICE negotiation a generous
-    // window, then retry only once signaling itself is healthy again.
+    const everHealthy = !!(h && h.everHealthy);
+    const sinceHealthy = h && h.lastHealthyAt ? now - h.lastHealthyAt : null;
+
+    // EXPERIMENT: once a receiver has reached a genuinely healthy WebRTC state,
+    // protect that media call from transient disconnected/connecting fluctuations.
+    // Only terminal failed/closed states may retire a once-healthy call.
+    // Calls that have NEVER become healthy may still be replaced after the generous
+    // connection grace period, but only while PeerJS signaling itself is healthy.
     const signalingReady = !!(mediaPeer && mediaPeer.open);
-    const stale = terminal || (!healthy && signalingReady && age > MEDIA_CALL_CONNECT_GRACE_MS);
+    const stale = terminal || (!everHealthy && !healthy && signalingReady && age > MEDIA_CALL_CONNECT_GRACE_MS);
 
     return {
       healthy,
       stale,
+      protected: everHealthy && !terminal,
+      everHealthy,
+      sinceHealthy,
       state: pcState || iceState || (h && h.lastState) || "unknown",
       age
     };
@@ -2876,18 +2890,20 @@
 
     let healthy = 0;
     let connecting = 0;
+    let protectedCalls = 0;
     let stale = 0;
 
     receiverIds.forEach(id => {
       const state = mediaCallState(id);
       if(state.healthy) healthy += 1;
+      else if(state.protected) protectedCalls += 1;
       else if(state.stale) stale += 1;
       else if(calls.has(id)) connecting += 1;
     });
 
     transportDiag.textContent =
       `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · ` +
-      `healthy ${healthy}/${receiverIds.size} · connecting ${connecting} · ` +
+      `healthy ${healthy}/${receiverIds.size} · protected ${protectedCalls} · connecting ${connecting} · ` +
       `controls ${controls.size}/${receiverIds.size} · ` +
       `attempts ${mediaCallAttempts} · retries ${Math.max(0, mediaCallAttempts - receiverIds.size)} · ` +
       `create errors ${mediaCallCreateErrors}`;
@@ -2910,7 +2926,7 @@
       return;
     }
 
-    // First retire departed receivers and any calls that never became healthy.
+    // Retire departed receivers and only calls that are truly stale under the protected-call experiment.
     for(const id of Array.from(calls.keys())){
       if(!receiverIds.has(id)){
         retireMediaCall(id);
