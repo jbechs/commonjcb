@@ -2512,22 +2512,15 @@
     const snapshot = storedSessionSnapshot();
     const wasManagerArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1";
 
-    if(wasManagerArmed && storedSessionIsActuallyUnderway(snapshot)){
-      // True mid-show recovery: the scheduled show has actually started,
-      // so restore its original time/session.
-      sessionId = snapshot.id;
-      if(startField && snapshot.startValue){
-        startField.value = snapshot.startValue;
-      }
-      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
-    }else{
-      // Setup/preshow/ordinary refresh: keep the player's freshly generated
-      // next-whole-minute >60s default rather than restoring an old session.
-      clearStoredIntercomSession();
-      sessionId = null;
-      const proposed = intercomChannelForStartValue(startField && startField.value);
-      if(sessionDiag) sessionDiag.textContent =
-        "Session: " + (proposed || "—") + " (proposed)";
+    // Manager refresh must never silently rewrite the freshly generated visible
+    // Start Time. Keep stored room metadata only for an explicit Begin-time
+    // mid-show rejoin decision.
+    sessionId = null;
+    const proposed = intercomChannelForStartValue(startField && startField.value);
+    if(sessionDiag){
+      sessionDiag.textContent =
+        "Session: " + (proposed || "—") +
+        (wasManagerArmed && storedSessionIsActuallyUnderway(snapshot) ? " (rejoin available)" : " (proposed)");
     }
   }catch(_e){}
 
@@ -2595,8 +2588,17 @@
     if(armed) return;
     try{
       const snapshot = storedSessionSnapshot();
-      if(snapshot.startValue && startField && startField.value !== snapshot.startValue){
+      const visibleValue = startField && startField.value;
+      const exactRejoin =
+        sessionStorage.getItem(MANAGER_ARMED_KEY) === "1" &&
+        storedSessionIsActuallyUnderway(snapshot) &&
+        snapshot.startValue === visibleValue;
+
+      if(!exactRejoin){
+        // The Manager is visibly proposing a new show. Retire the old room now.
         sessionStorage.removeItem(MANAGER_ARMED_KEY);
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(SESSION_START_KEY);
       }
     }catch(_e){}
     const frozen = freezeSession(startField && startField.value);
