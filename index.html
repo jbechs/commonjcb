@@ -180,7 +180,7 @@
   <main class="container">
     <div class="godMicControls">
       <button id="godMicButton" class="godMicButton" type="button" style="background:#000;color:#fff;border:1px solid rgba(255,255,255,.22)">Broadcast</button>
-      <div id="godMicStatus" class="godMicStatus">Broadcast ready</div>
+      <div id="godMicStatus" class="godMicStatus">Broadcast ready</div><div style="font-size:.68rem;opacity:.45;margin-top:4px">BUILD proof-bb466b8b · common-proof-121a9edb438d</div>
     </div>
     <div class="header">
       <h1>common manager</h1>
@@ -2325,7 +2325,7 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-diag-730fc8d668bd';
+  const CHANNEL = 'common-proof-121a9edb438d';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
   let peer = null, stream = null;
@@ -2348,7 +2348,7 @@
       set("Opening broadcast channel…");
       peer = new Peer(CHANNEL);
       peer.on("open", () => {
-        set("LIVE · 0 receivers connected");
+        set("LIVE common-proof-121a9edb438d · 0 receivers connected");
         btn.textContent = "Broadcasting";
       });
       peer.on("connection", conn => {
