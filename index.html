@@ -1809,7 +1809,7 @@
         const targetSec = Math.min(
           expectedAtAssignmentSec + startupCalibrationBiasSec,
           audio.duration - 0.05
-        );
+        ); 
 
         timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = targetSec;
