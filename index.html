@@ -2444,6 +2444,7 @@
           refreshGodMicStatus();
         });
         godMicPeer.on("connection", conn=>{
+          godMicLog(`incoming receiver connection seen ${conn.peer}`);
           godMicLog(`receiver discovered ${conn.peer}`);
           const startCallForReceiver = ()=>{
             if(!godMicBroadcastStream || godMicCalls.has(conn.peer)) return;
@@ -2454,6 +2455,7 @@
             call.on("error", err=>{ godMicCalls.delete(conn.peer); godMicLog(`media call error ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`); });
           };
           conn.on("open", ()=>{
+            godMicLog(`receiver data open ${conn.peer}`);
             godMicReceivers.set(conn.peer, conn);
             godMicLog(`receiver connection open ${conn.peer}`);
             try{ conn.send({type:"manager-ready"}); }catch(_){ }
