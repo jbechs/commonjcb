@@ -1809,7 +1809,7 @@
         const targetSec = Math.min(
           expectedAtAssignmentSec + startupCalibrationBiasSec,
           audio.duration - 0.05
-        ); 
+        );
 
         timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = targetSec;
@@ -2326,175 +2326,198 @@
 </div>
 <script>
 (() => {
-  let PRESENCE_CHANNEL = null;
+  const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
+  const SESSION_KEY = 'common-v6-intercom-session';
+  const HEARTBEAT_MS = 8000;
+  const POLL_MS = 2000;
+
+  const btn = document.getElementById("godMicButton");
+  const status = document.getElementById("godMicStatus");
+  const diag = document.getElementById("godMicDiagnostics");
+  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
+  const begin = document.getElementById("playButton");
+  const startField = document.getElementById("startTime");
+
+  let sessionId = null;
+  let managerInstanceId = null;
+  let armed = false;
+  let heartbeatTimer = null;
+  let pollTimer = null;
+  let receiverIds = new Set();
+
+  let mediaPeer = null;
+  let stream = null;
+  let broadcasting = false;
+  const calls = new Map();
 
   function intercomChannelForStartValue(value){
     const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
     return clean ? `common-v6-${clean}` : null;
   }
 
-  function frozenIntercomChannelForStartValue(value){
+  function freezeSession(value){
     const requested = intercomChannelForStartValue(value);
     let frozen = null;
     try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
-    const channel = frozen || requested;
-
-    if(channel && !frozen){
-      try{ sessionStorage.setItem(SESSION_KEY, channel); }catch(_e){}
+    sessionId = frozen || requested;
+    if(sessionId && !frozen){
+      try{ sessionStorage.setItem(SESSION_KEY, sessionId); }catch(_e){}
     }
-
-    if(sessionDiag) sessionDiag.textContent = "Session: " + (channel || "—");
-    return channel;
+    if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
+    return sessionId;
   }
 
-  const MEDIA_CHANNEL = 'common-presence-3651686aed-media';
-  const btn = document.getElementById("godMicButton");
-  const status = document.getElementById("godMicStatus");
-  const diag = document.getElementById("godMicDiagnostics");
-  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
-  const SESSION_KEY = "common-v6-intercom-session";
-
-  let presencePeer = null;
-  let mediaPeer = null;
-  let stream = null;
-  let broadcasting = false;
-  const receivers = new Map();
-  const calls = new Map();
-
-  const set = t => {
-    status.textContent = t;
-    if(diag) diag.textContent = "Intercom — " + t;
-  };
   try{
     const stored = sessionStorage.getItem(SESSION_KEY);
-    if(stored && sessionDiag) sessionDiag.textContent = "Session: " + stored;
+    if(stored){
+      sessionId = stored;
+      if(sessionDiag) sessionDiag.textContent = "Session: " + stored;
+    }
   }catch(_e){}
 
+  const set = t => {
+    if(status) status.textContent = t;
+    if(diag) diag.textContent = "Intercom — " + t;
+  };
+
+  async function registry(path="", options={}){
+    if(!sessionId) throw new Error("No intercom session");
+    const url = `${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}${path}`;
+    const response = await fetch(url, {
+      cache:"no-store",
+      ...options,
+      headers:{"Content-Type":"application/json", ...(options.headers||{})}
+    });
+    if(!response.ok) throw new Error(`Registry ${response.status}`);
+    return await response.json();
+  }
+
   const receiverCountText = () =>
-    `${receivers.size} receiver${receivers.size === 1 ? "" : "s"} connected`;
+    `${receiverIds.size} receiver${receiverIds.size === 1 ? "" : "s"} connected`;
 
-  const updateReady = () => {
-    if(!broadcasting) set(`Broadcast ready · ${receiverCountText()}`);
-  };
-
-  const registerReceiver = conn => {
-    receivers.set(conn.peer, conn);
-    updateReady();
-
-    conn.on("open", () => {
-      receivers.set(conn.peer, conn);
-      try{ conn.send({type:"manager-ready"}); }catch(_e){}
-      updateReady();
-    });
-
-    conn.on("close", () => {
-      receivers.delete(conn.peer);
-      updateReady();
-    });
-
-    conn.on("error", () => {
-      if(!conn.open) receivers.delete(conn.peer);
-      updateReady();
-    });
-  };
-
-  const openPresence = (channel) => {
-    if(!channel){ set("Manager session needs a Start Time"); return; }
-    if(!window.Peer){ set("PeerJS unavailable"); return; }
-
-    // If this page is re-armed for a different session, retire only the old
-    // presence roster. Common playback/sync remains untouched.
-    if(presencePeer){
-      try{ presencePeer.destroy(); }catch(_e){}
-      presencePeer = null;
-      receivers.clear();
+  function updateReady(){
+    if(!broadcasting){
+      set(armed ? `Broadcast ready · ${receiverCountText()}` : "Press Begin to arm intercom session");
     }
+  }
 
-    PRESENCE_CHANNEL = channel;
-    set("Opening manager session…");
-    presencePeer = new Peer(PRESENCE_CHANNEL);
+  async function registerManager(){
+    if(!sessionId || !managerInstanceId) return;
+    await registry("/manager", {
+      method:"POST",
+      body:JSON.stringify({managerInstanceId})
+    });
+  }
 
-    presencePeer.on("open", () => {
+  async function refreshRoster(){
+    if(!sessionId) return;
+    try{
+      const state = await registry("");
+      const nextIds = new Set((state.receivers || []).map(r => r.peerId));
+      receiverIds = nextIds;
+
+      if(broadcasting && mediaPeer && mediaPeer.open && stream){
+        receiverIds.forEach(id => {
+          if(!calls.has(id)) placeCall(id);
+        });
+      }
       updateReady();
+      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
+    }catch(_e){
+      if(!broadcasting) set("Session registry reconnecting…");
+    }
+  }
+
+  function clearRosterTimers(){
+    if(heartbeatTimer) clearInterval(heartbeatTimer);
+    if(pollTimer) clearInterval(pollTimer);
+    heartbeatTimer = null;
+    pollTimer = null;
+  }
+
+  async function armManager(){
+    if(armed) return;
+    const frozen = freezeSession(startField && startField.value);
+    if(!frozen){
+      set("Manager session needs a Start Time");
+      return;
+    }
+    managerInstanceId =
+      (globalThis.crypto && typeof crypto.randomUUID === "function")
+        ? crypto.randomUUID()
+        : `mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    set("Arming manager session…");
+    try{
+      await registerManager();
+      armed = true;
       btn.disabled = false;
-    });
-    presencePeer.on("connection", registerReceiver);
-    presencePeer.on("disconnected", () => {
-      if(!broadcasting) set("Manager presence reconnecting…");
-      try{ presencePeer.reconnect(); }catch(_e){}
-    });
-    presencePeer.on("error", e => {
-      if(e && e.type === "unavailable-id") set("Manager session already in use");
-      else if(!broadcasting) set("Manager presence error: " + (e.type || e.message || "unknown"));
-    });
-  };
+      await refreshRoster();
+      clearRosterTimers();
+      heartbeatTimer = setInterval(() => registerManager().catch(()=>{}), HEARTBEAT_MS);
+      pollTimer = setInterval(refreshRoster, POLL_MS);
+      updateReady();
+    }catch(_e){
+      set("Manager registry unavailable");
+      btn.disabled = true;
+    }
+  }
 
-  const placeMediaCalls = () => {
-    receivers.forEach((conn, receiverId) => {
-      if(calls.has(receiverId)) return;
-      try{
-        const call = mediaPeer.call(receiverId, stream);
-        calls.set(receiverId, call);
-        call.on("close", () => {
-          calls.delete(receiverId);
-          if(broadcasting) set(`LIVE · ${receiverCountText()}`);
-        });
-        call.on("error", () => {
-          calls.delete(receiverId);
-          if(broadcasting && calls.size > 0){
-            set(`LIVE · ${receiverCountText()}`);
-            if(diag) diag.textContent =
-              `Intercom — LIVE · ${receiverCountText()} · one media call warning`;
-          }else if(broadcasting){
-            set("Broadcast interrupted");
-          }
-        });
-      }catch(_e){}
-    });
+  function placeCall(receiverId){
+    if(!broadcasting || !mediaPeer || !mediaPeer.open || !stream) return;
+    if(calls.has(receiverId)) return;
+    try{
+      const c = mediaPeer.call(receiverId, stream);
+      calls.set(receiverId, c);
+      c.on("close", () => calls.delete(receiverId));
+      c.on("error", () => {
+        calls.delete(receiverId);
+        if(broadcasting && calls.size === 0 && receiverIds.size > 0){
+          if(diag) diag.textContent = "Intercom — LIVE · one or more media calls retrying";
+        }
+      });
+    }catch(_e){}
+  }
+
+  function placeAllCalls(){
+    receiverIds.forEach(placeCall);
     set(`LIVE · ${receiverCountText()}`);
-  };
+  }
 
-  const endBroadcast = () => {
-    // End only the disposable media session. Presence/receiver roster remains
-    // alive so another Broadcast can begin immediately without participants
-    // reconnecting or touching Common sync.
+  function endBroadcast(){
     broadcasting = false;
-
-    calls.forEach(call => {
-      try{ call.close(); }catch(_e){}
-    });
+    calls.forEach(c => { try{ c.close(); }catch(_e){} });
     calls.clear();
 
     if(stream){
-      try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
+      try{ stream.getTracks().forEach(t => t.stop()); }catch(_e){}
       stream = null;
     }
-
     if(mediaPeer){
       try{ mediaPeer.destroy(); }catch(_e){}
       mediaPeer = null;
     }
 
-    btn.disabled = false;
     btn.textContent = "Broadcast";
+    btn.disabled = !armed;
     updateReady();
-  };
+  }
 
   btn.disabled = true;
   set("Press Begin to arm intercom session");
 
-  const managerBegin = document.getElementById("playButton");
-  const managerStartField = document.getElementById("startTime");
-  if(managerBegin){
-    managerBegin.addEventListener("click", () => {
-      const channel = frozenIntercomChannelForStartValue(
-        managerStartField && managerStartField.value
-      );
-      openPresence(channel);
+  if(begin){
+    begin.addEventListener("click", () => {
+      armManager();
     }, {once:true, capture:true});
   }
 
   btn.addEventListener("click", async () => {
+    if(!armed){
+      set("Press Begin to arm intercom session");
+      return;
+    }
+
     if(broadcasting){
       endBroadcast();
       return;
@@ -2504,10 +2527,10 @@
     set("Requesting microphone…");
 
     try{
-      // Acquire mic FIRST. Each broadcast then gets a brand-new anonymous
-      // media peer, avoiding stale/reused media-peer IDs between sessions.
+      await refreshRoster();
+
       stream = await navigator.mediaDevices.getUserMedia({
-        audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
+        audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
         video:false
       });
 
@@ -2518,44 +2541,33 @@
         broadcasting = true;
         btn.disabled = false;
         btn.textContent = "End Broadcast";
-        placeMediaCalls();
+        placeAllCalls();
       });
 
       mediaPeer.on("error", e => {
         const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
-
         if(broadcasting && calls.size > 0 && kind === "network"){
           if(diag) diag.textContent =
             `Intercom — LIVE · ${receiverCountText()} · media peer network warning`;
           set(`LIVE · ${receiverCountText()}`);
           return;
         }
-
-        // If startup itself fails, cleanly retire this media session but keep
-        // presence intact so the operator can immediately try Broadcast again.
         set("Broadcast peer error: " + kind);
-        calls.clear();
-        if(stream){
-          try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
-          stream = null;
-        }
-        if(mediaPeer){
-          try{ mediaPeer.destroy(); }catch(_e){}
-          mediaPeer = null;
-        }
-        broadcasting = false;
-        btn.disabled = false;
-        btn.textContent = "Broadcast";
+        endBroadcast();
       });
     }catch(e){
-      set("Mic error: " + (e.message || e));
+      set("Mic/session error: " + (e.message || e));
       if(stream){
-        try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
+        try{ stream.getTracks().forEach(t => t.stop()); }catch(_e){}
         stream = null;
       }
-      btn.disabled = false;
+      btn.disabled = !armed;
       btn.textContent = "Broadcast";
     }
+  });
+
+  window.addEventListener("pagehide", () => {
+    clearRosterTimers();
   });
 })();
 </script>
