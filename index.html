@@ -1545,7 +1545,52 @@
         }, 3000);
 
         setStatus(reason);
-        updateTransport();
+    
+    // TEMPORARY EXACT GOLDEN BROADCAST TEST
+    let manualBroadcastPeer = null;
+    let manualBroadcastStream = null;
+    let manualBroadcastCalls = new Map();
+    godMicButton.addEventListener("click", async (ev)=>{
+      ev.stopImmediatePropagation();
+      if(manualBroadcastPeer) return;
+      godMicButton.disabled = true;
+      setGodMicStatus("Requesting microphone…");
+      try{
+        manualBroadcastStream = await navigator.mediaDevices.getUserMedia({
+          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
+          video:false
+        });
+        setGodMicStatus("Opening broadcast channel…");
+        manualBroadcastPeer = new Peer(INTERCOM_HOST_ID);
+        manualBroadcastPeer.on("open", ()=>{
+          setGodMicStatus("LIVE · 0 receivers connected");
+          godMicButton.textContent = "Broadcasting";
+          godMicButton.disabled = true;
+        });
+        manualBroadcastPeer.on("connection", conn=>{
+          conn.on("open", ()=>{
+            try{ conn.send({type:"listener-ready"}); }catch(_err){}
+            const call = manualBroadcastPeer.call(conn.peer, manualBroadcastStream);
+            manualBroadcastCalls.set(conn.peer, call);
+            try{ conn.send({type:"mic-state", live:true}); }catch(_err){}
+            setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
+            call.on("close", ()=>{
+              manualBroadcastCalls.delete(conn.peer);
+              setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
+            });
+          });
+        });
+        manualBroadcastPeer.on("error", err=>{
+          setGodMicStatus("Peer error: " + (err.type || err.message || "unknown"));
+          godMicButton.disabled = false;
+        });
+      }catch(err){
+        setGodMicStatus("Mic error: " + (err.message || err));
+        godMicButton.disabled = false;
+      }
+    }, true);
+
+    updateTransport();
         updateDriftStats();
         return true;
       }else{
@@ -2317,10 +2362,12 @@
 
     // --- COMMON MANAGER GOD MIC (golden handshake) ----------------------
     // Broadcast layer only. Common's v5 sync/player code above is unchanged.
-    const godMicButton = document.getElementById("godMicButton");
+    const oldGodMicButton = document.getElementById("godMicButton");
+    const godMicButton = oldGodMicButton.cloneNode(true);
+    oldGodMicButton.replaceWith(godMicButton);
     const godMicStatus = document.getElementById("godMicStatus");
     const godMicDiagnostics = document.getElementById("godMicDiagnostics");
-    const INTERCOM_HOST_ID = "common-v5-4348238a9a34";
+    const INTERCOM_HOST_ID = "common-manual-c2954238e75e";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     const GOD_MIC_GAIN = Math.pow(10, 5/20);
 
