@@ -2325,47 +2325,128 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-sequence-02fad24c4a3b';
+  const CHANNEL = 'common-presence-650640011170';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
-  let peer = null, stream = null;
-  const calls = new Map();
   const diag = document.getElementById("godMicDiagnostics");
+
+  let peer = null;
+  let stream = null;
+  let broadcasting = false;
+  const receivers = new Map();
+  const calls = new Map();
+
   const set = t => {
     status.textContent = t;
     if(diag) diag.textContent = "Intercom — " + t;
   };
+
+  const receiverCountText = () =>
+    `${receivers.size} receiver${receivers.size === 1 ? "" : "s"} connected`;
+
+  const updateIdleStatus = () => {
+    if(!broadcasting) set(`Broadcast ready · ${receiverCountText()}`);
+  };
+
+  const placeCall = conn => {
+    if(!broadcasting || !stream || !peer || !conn || !conn.open) return;
+    if(calls.has(conn.peer)) return;
+
+    const call = peer.call(conn.peer, stream);
+    calls.set(conn.peer, call);
+    set(`LIVE · ${receiverCountText()}`);
+
+    call.on("close", () => {
+      calls.delete(conn.peer);
+      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
+    });
+    call.on("error", () => {
+      calls.delete(conn.peer);
+      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
+    });
+  };
+
+  const registerReceiver = conn => {
+    receivers.set(conn.peer, conn);
+    updateIdleStatus();
+
+    conn.on("open", () => {
+      receivers.set(conn.peer, conn);
+      updateIdleStatus();
+      try{ conn.send({type:"manager-ready"}); }catch(_e){}
+      if(broadcasting) placeCall(conn);
+    });
+
+    conn.on("close", () => {
+      receivers.delete(conn.peer);
+      const call = calls.get(conn.peer);
+      if(call){ try{ call.close(); }catch(_e){} }
+      calls.delete(conn.peer);
+      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
+      else updateIdleStatus();
+    });
+
+    conn.on("error", () => {
+      if(!conn.open) receivers.delete(conn.peer);
+      if(!broadcasting) updateIdleStatus();
+    });
+  };
+
+  const openManagerPresence = () => {
+    if(!window.Peer){
+      set("PeerJS unavailable");
+      return;
+    }
+    set("Opening manager channel…");
+    peer = new Peer(CHANNEL);
+
+    peer.on("open", () => {
+      updateIdleStatus();
+      btn.disabled = false;
+    });
+
+    peer.on("connection", registerReceiver);
+
+    peer.on("disconnected", () => {
+      set("Manager reconnecting…");
+      try{ peer.reconnect(); }catch(_e){}
+    });
+
+    peer.on("error", e => {
+      if(e && e.type === "unavailable-id"){
+        set("Manager channel already in use");
+      }else{
+        set("Manager peer error: " + (e.type || e.message || "unknown"));
+      }
+    });
+  };
+
+  btn.disabled = true;
+  openManagerPresence();
+
   btn.addEventListener("click", async () => {
-    if(peer) return;
+    if(!peer || !peer.open) {
+      set("Manager channel not ready yet");
+      return;
+    }
+    if(broadcasting) return;
+
     btn.disabled = true;
     set("Requesting microphone…");
+
     try{
       stream = await navigator.mediaDevices.getUserMedia({
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
         video:false
       });
-      if(!window.Peer) throw new Error("PeerJS unavailable");
-      set("Opening broadcast channel…");
-      peer = new Peer(CHANNEL);
-      peer.on("open", () => {
-        set("LIVE · 0 receivers connected");
-        btn.textContent = "Broadcasting";
-      });
-      peer.on("connection", conn => {
-        conn.on("open", () => {
-          const call = peer.call(conn.peer, stream);
-          calls.set(conn.peer, call);
-          set(`LIVE · ${calls.size} receiver${calls.size===1?"":"s"} connected`);
-          call.on("close", () => {
-            calls.delete(conn.peer);
-            set(`LIVE · ${calls.size} receiver${calls.size===1?"":"s"} connected`);
-          });
-        });
-      });
-      peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); btn.disabled=false; });
+      broadcasting = true;
+      btn.textContent = "Broadcasting";
+      receivers.forEach(conn => placeCall(conn));
+      set(`LIVE · ${receiverCountText()}`);
     }catch(e){
       set("Mic error: " + (e.message || e));
-      btn.disabled=false;
+      btn.disabled = false;
+      return;
     }
   });
 })();
