@@ -2478,7 +2478,10 @@
   let mediaCallAttempts = 0;
   let mediaCallCreateErrors = 0;
   const calls = new Map();
+  const callHealth = new Map();
   const controls = new Map();
+
+  const MEDIA_CALL_CONNECT_GRACE_MS = 7000;
 
   function intercomChannelForStartValue(value){
     const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
@@ -2733,20 +2736,86 @@
       }
 
       calls.set(receiverId, c);
-
-      c.on("close", () => {
-        if(calls.get(receiverId) === c) calls.delete(receiverId);
+      callHealth.set(receiverId, {
+        createdAt: Date.now(),
+        connectedAt: null,
+        lastState: "created"
       });
 
-      c.on("error", () => {
+      const pc = c.peerConnection;
+      if(pc){
+        const updateState = () => {
+          const h = callHealth.get(receiverId);
+          if(!h) return;
+
+          const state = pc.connectionState || pc.iceConnectionState || "unknown";
+          h.lastState = state;
+          if((pc.connectionState === "connected" || pc.iceConnectionState === "connected" ||
+              pc.iceConnectionState === "completed") && !h.connectedAt){
+            h.connectedAt = Date.now();
+          }
+        };
+
+        pc.addEventListener?.("connectionstatechange", updateState);
+        pc.addEventListener?.("iceconnectionstatechange", updateState);
+        updateState();
+      }
+
+      const retire = () => {
         if(calls.get(receiverId) === c) calls.delete(receiverId);
-      });
+        callHealth.delete(receiverId);
+      };
+
+      c.on("close", retire);
+      c.on("error", retire);
 
       return true;
     }catch(_e){
       mediaCallCreateErrors += 1;
       return false;
     }
+  }
+
+  function mediaCallState(receiverId){
+    const c = calls.get(receiverId);
+    if(!c) return {healthy:false, stale:false, state:"missing"};
+
+    const pc = c.peerConnection;
+    const h = callHealth.get(receiverId);
+    const now = Date.now();
+
+    const pcState = pc && pc.connectionState;
+    const iceState = pc && pc.iceConnectionState;
+
+    const healthy =
+      pcState === "connected" ||
+      iceState === "connected" ||
+      iceState === "completed";
+
+    const terminal =
+      pcState === "failed" ||
+      pcState === "closed" ||
+      iceState === "failed" ||
+      iceState === "closed";
+
+    const age = h ? now - h.createdAt : 0;
+    const stale = terminal || (!healthy && age > MEDIA_CALL_CONNECT_GRACE_MS);
+
+    return {
+      healthy,
+      stale,
+      state: pcState || iceState || (h && h.lastState) || "unknown",
+      age
+    };
+  }
+
+  function retireMediaCall(receiverId){
+    const c = calls.get(receiverId);
+    if(c){
+      try{ c.close(); }catch(_e){}
+    }
+    calls.delete(receiverId);
+    callHealth.delete(receiverId);
   }
 
   function placeAllPersistentConnections(){
@@ -2758,25 +2827,42 @@
 
   function updatePersistentReadyDiagnostic(){
     if(!transportDiag) return;
+
+    let healthy = 0;
+    let connecting = 0;
+    let stale = 0;
+
+    receiverIds.forEach(id => {
+      const state = mediaCallState(id);
+      if(state.healthy) healthy += 1;
+      else if(state.stale) stale += 1;
+      else if(calls.has(id)) connecting += 1;
+    });
+
     transportDiag.textContent =
       `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · ` +
-      `${calls.size}/${receiverIds.size} media calls · ` +
-      `${controls.size}/${receiverIds.size} controls · ` +
-      `attempts ${mediaCallAttempts} · create errors ${mediaCallCreateErrors}`;
+      `healthy ${healthy}/${receiverIds.size} · connecting ${connecting} · ` +
+      `controls ${controls.size}/${receiverIds.size} · ` +
+      `attempts ${mediaCallAttempts} · retries ${Math.max(0, mediaCallAttempts - receiverIds.size)} · ` +
+      `create errors ${mediaCallCreateErrors}`;
   }
 
   function reconcilePersistentConnections(){
     if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return;
 
-    placeAllPersistentConnections();
-
-    // Remove departed receivers, but leave active show peers otherwise untouched.
-    for(const [id, c] of calls){
+    // First retire departed receivers and any calls that never became healthy.
+    for(const id of Array.from(calls.keys())){
       if(!receiverIds.has(id)){
-        try{ c.close(); }catch(_e){}
-        calls.delete(id);
+        retireMediaCall(id);
+        continue;
+      }
+
+      const state = mediaCallState(id);
+      if(state.stale){
+        retireMediaCall(id);
       }
     }
+
     for(const [id, c] of controls){
       if(!receiverIds.has(id)){
         try{ c.close(); }catch(_e){}
@@ -2784,6 +2870,8 @@
       }
     }
 
+    // Then fill every missing receiver again.
+    placeAllPersistentConnections();
     updatePersistentReadyDiagnostic();
   }
 
@@ -2912,6 +3000,7 @@
 
     calls.forEach(c => { try{ c.close(); }catch(_e){} });
     calls.clear();
+    callHealth.clear();
 
     if(stream){
       try{ stream.getTracks().forEach(t => t.stop()); }catch(_e){}
