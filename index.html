@@ -202,6 +202,7 @@
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
       <div id="godMicDiagnostics" class="timingProbe">Intercom — session not armed</div>
+      <div id="broadcastTransportDiagnostics" class="timingProbe">Broadcast transport — idle</div>
       <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
@@ -2335,6 +2336,8 @@
   const status = document.getElementById("godMicStatus");
   const diag = document.getElementById("godMicDiagnostics");
   const sessionDiag = document.getElementById("intercomSessionDiagnostics");
+  const transportDiag = document.getElementById("broadcastTransportDiagnostics");
+  let transportStatsTimer = null;
   const begin = document.getElementById("playButton");
   const startField = document.getElementById("startTime");
 
@@ -2463,6 +2466,68 @@
     }
   }
 
+
+  function stopBroadcastTransportStats(){
+    if(transportStatsTimer) clearInterval(transportStatsTimer);
+    transportStatsTimer = null;
+  }
+
+  async function sampleBroadcastTransportStats(){
+    if(!broadcasting || calls.size === 0){
+      if(transportDiag) transportDiag.textContent =
+        `Broadcast transport — ${calls.size} active media call${calls.size === 1 ? "" : "s"}`;
+      return;
+    }
+
+    let totalPacketsSent = 0, totalBytesSent = 0, remoteLost = 0;
+    let remoteReports = 0, remoteJitterSumMs = 0, remoteRttSumMs = 0, remoteRttCount = 0;
+    let pcConnected = 0;
+
+    for(const call of calls.values()){
+      const pc = call && call.peerConnection;
+      if(!pc || typeof pc.getStats !== "function") continue;
+      try{
+        const report = await pc.getStats();
+        report.forEach(stat => {
+          if(stat.type === "outbound-rtp" && stat.kind === "audio" && !stat.isRemote){
+            if(Number.isFinite(stat.packetsSent)) totalPacketsSent += stat.packetsSent;
+            if(Number.isFinite(stat.bytesSent)) totalBytesSent += stat.bytesSent;
+          }
+          if(stat.type === "remote-inbound-rtp" && stat.kind === "audio"){
+            remoteReports += 1;
+            if(Number.isFinite(stat.packetsLost)) remoteLost += stat.packetsLost;
+            if(Number.isFinite(stat.jitter)) remoteJitterSumMs += stat.jitter * 1000;
+            if(Number.isFinite(stat.roundTripTime)){
+              remoteRttSumMs += stat.roundTripTime * 1000;
+              remoteRttCount += 1;
+            }
+          }
+        });
+        if(pc.connectionState === "connected") pcConnected += 1;
+      }catch(_e){}
+    }
+
+    const avgRemoteJitter = remoteReports > 0 ? remoteJitterSumMs / remoteReports : null;
+    const avgRtt = remoteRttCount > 0 ? remoteRttSumMs / remoteRttCount : null;
+    const mb = totalBytesSent / (1024 * 1024);
+
+    if(transportDiag){
+      transportDiag.innerHTML =
+        `Broadcast transport — calls ${calls.size} · PC connected ${pcConnected} · ` +
+        `sent ${totalPacketsSent} pkts / ${mb.toFixed(2)} MB<br>` +
+        `Remote reports ${remoteReports} · loss ${remoteLost} · ` +
+        `jitter ${Number.isFinite(avgRemoteJitter) ? Math.round(avgRemoteJitter) + " ms" : "—"} · ` +
+        `RTT ${Number.isFinite(avgRtt) ? Math.round(avgRtt) + " ms" : "—"}`;
+    }
+  }
+
+  function startBroadcastTransportStats(){
+    stopBroadcastTransportStats();
+    if(transportDiag) transportDiag.textContent = "Broadcast transport — collecting…";
+    sampleBroadcastTransportStats();
+    transportStatsTimer = setInterval(sampleBroadcastTransportStats, 2000);
+  }
+
   function placeCall(receiverId){
     if(!broadcasting || !mediaPeer || !mediaPeer.open || !stream) return;
     if(calls.has(receiverId)) return;
@@ -2486,6 +2551,8 @@
 
   function endBroadcast(){
     broadcasting = false;
+    stopBroadcastTransportStats();
+    if(transportDiag) transportDiag.textContent = "Broadcast transport — idle";
     calls.forEach(c => { try{ c.close(); }catch(_e){} });
     calls.clear();
 
@@ -2542,6 +2609,7 @@
         btn.disabled = false;
         btn.textContent = "End Broadcast";
         placeAllCalls();
+        startBroadcastTransportStats();
       });
 
       mediaPeer.on("error", e => {
