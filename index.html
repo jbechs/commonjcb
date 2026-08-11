@@ -2485,7 +2485,16 @@
   let receiverIds = new Set();
 
   let mediaPeer = null;
+  // Raw microphone capture is held for the whole armed show. `stream` is the
+  // persistent WebRTC send stream produced by a zero/one Web Audio gain gate.
+  // This keeps the mic track and RTP transport alive even while Broadcast is off,
+  // so Broadcast toggles do not enable/disable/stop a MediaStreamTrack mid-show.
+  let micStream = null;
   let stream = null;
+  let intercomAudioContext = null;
+  let intercomMicSource = null;
+  let intercomGain = null;
+  let intercomDestination = null;
   let broadcasting = false;
   let persistentMediaReady = false;
   let persistentMediaPromise = null;
@@ -2928,12 +2937,54 @@
   }
 
   function setMicEnabled(enabled){
-    if(!stream) return;
+    // IMPORTANT: do not toggle MediaStreamTrack.enabled here. On iOS/Safari that
+    // can reconfigure the active media/audio session and disturb Common's main
+    // soundtrack. Keep capture + RTP continuously alive and gate only amplitude.
+    if(!intercomGain || !intercomAudioContext) return;
     try{
-      stream.getAudioTracks().forEach(track => {
-        track.enabled = !!enabled;
+      const now = intercomAudioContext.currentTime;
+      intercomGain.gain.cancelScheduledValues(now);
+      intercomGain.gain.setValueAtTime(enabled ? 1 : 0, now);
+    }catch(_e){
+      try{ intercomGain.gain.value = enabled ? 1 : 0; }catch(__e){}
+    }
+  }
+
+  async function ensurePersistentAudioGate(){
+    if(stream && intercomGain && intercomAudioContext && micStream) return true;
+
+    if(!micStream){
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
+        video:false
       });
-    }catch(_e){}
+    }
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if(!AudioContextCtor) throw new Error("Web Audio unavailable for persistent intercom gate");
+
+    if(!intercomAudioContext || intercomAudioContext.state === "closed"){
+      intercomAudioContext = new AudioContextCtor({latencyHint:"interactive"});
+    }
+    if(intercomAudioContext.state === "suspended"){
+      await intercomAudioContext.resume();
+    }
+
+    if(!intercomMicSource || !intercomGain || !intercomDestination){
+      intercomMicSource = intercomAudioContext.createMediaStreamSource(micStream);
+      intercomGain = intercomAudioContext.createGain();
+      intercomDestination = intercomAudioContext.createMediaStreamDestination();
+      intercomGain.gain.value = 0;
+      intercomMicSource.connect(intercomGain);
+      intercomGain.connect(intercomDestination);
+      stream = intercomDestination.stream;
+    }
+
+    // The raw mic track remains enabled for the whole show. The outgoing WebRTC
+    // stream therefore continues to carry RTP silence while Broadcast is off.
+    try{ micStream.getAudioTracks().forEach(track => { track.enabled = true; }); }catch(_e){}
+    setMicEnabled(false);
+    return true;
   }
 
   async function ensurePersistentMedia(){
@@ -2944,15 +2995,9 @@
       try{
         set("Preparing persistent intercom…");
 
-        if(!stream){
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-            video:false
-          });
-        }
-
-        // Keep capture alive for the whole show, but begin logically muted.
-        setMicEnabled(false);
+        // Establish one continuous capture + RTP path before the show. Broadcast
+        // later changes only the gain gate; it never toggles or recreates media.
+        await ensurePersistentAudioGate();
 
         if(!mediaPeer || mediaPeer.destroyed){
           mediaPeer = new Peer();
@@ -3052,6 +3097,21 @@
       stream = null;
     }
 
+    if(micStream){
+      try{ micStream.getTracks().forEach(t => t.stop()); }catch(_e){}
+      micStream = null;
+    }
+
+    try{ if(intercomMicSource) intercomMicSource.disconnect(); }catch(_e){}
+    try{ if(intercomGain) intercomGain.disconnect(); }catch(_e){}
+    intercomMicSource = null;
+    intercomGain = null;
+    intercomDestination = null;
+    if(intercomAudioContext){
+      try{ intercomAudioContext.close(); }catch(_e){}
+      intercomAudioContext = null;
+    }
+
     if(mediaPeer){
       try{ mediaPeer.destroy(); }catch(_e){}
       mediaPeer = null;
@@ -3117,4 +3177,3 @@
 
 </body>
 </html>
-
