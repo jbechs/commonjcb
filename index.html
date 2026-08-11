@@ -2485,16 +2485,7 @@
   let receiverIds = new Set();
 
   let mediaPeer = null;
-  // Raw microphone capture is held for the whole armed show. `stream` is the
-  // persistent WebRTC send stream produced by a zero/one Web Audio gain gate.
-  // This keeps the mic track and RTP transport alive even while Broadcast is off,
-  // so Broadcast toggles do not enable/disable/stop a MediaStreamTrack mid-show.
-  let micStream = null;
   let stream = null;
-  let intercomAudioContext = null;
-  let intercomMicSource = null;
-  let intercomGain = null;
-  let intercomDestination = null;
   let broadcasting = false;
   let persistentMediaReady = false;
   let persistentMediaPromise = null;
@@ -2505,10 +2496,11 @@
   const callHealth = new Map();
   const controls = new Map();
 
-  const MEDIA_CALL_CONNECT_GRACE_MS = 7000;
+  const MEDIA_CALL_CONNECT_GRACE_MS = 30000;
 
-  // Diagnostic-only network/WebRTC breadcrumbs. These do not reconnect,
-  // restart media, touch the soundtrack, or change broadcast behavior.
+  // Network/WebRTC breadcrumbs plus bounded signaling recovery.
+  // Recovery is confined to PeerJS signaling; it never touches the soundtrack,
+  // show clock, drift controller, or established WebRTC media path.
   let lastPeerEvent = "created";
   let lastNetworkEvent = navigator.onLine ? "online" : "offline";
   const networkConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
@@ -2849,7 +2841,11 @@
       iceState === "closed";
 
     const age = h ? now - h.createdAt : 0;
-    const stale = terminal || (!healthy && age > MEDIA_CALL_CONNECT_GRACE_MS);
+    // Never age-retire an in-progress media call merely because PeerJS signaling
+    // is temporarily disconnected. Give cross-network ICE negotiation a generous
+    // window, then retry only once signaling itself is healthy again.
+    const signalingReady = !!(mediaPeer && mediaPeer.open);
+    const stale = terminal || (!healthy && signalingReady && age > MEDIA_CALL_CONNECT_GRACE_MS);
 
     return {
       healthy,
@@ -2898,7 +2894,21 @@
   }
 
   function reconcilePersistentConnections(){
-    if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return;
+    if(!persistentMediaReady || !mediaPeer || !stream) return;
+
+    // If PeerJS signaling drops, ask the existing peer to reconnect instead of
+    // abandoning the persistent media architecture. Existing WebRTC calls are
+    // left alone while signaling recovers.
+    if(!mediaPeer.open){
+      if(mediaPeer.disconnected && !mediaPeer.destroyed){
+        try{
+          lastPeerEvent = "reconnecting";
+          mediaPeer.reconnect();
+        }catch(_e){}
+      }
+      updatePersistentReadyDiagnostic();
+      return;
+    }
 
     // First retire departed receivers and any calls that never became healthy.
     for(const id of Array.from(calls.keys())){
@@ -2937,54 +2947,12 @@
   }
 
   function setMicEnabled(enabled){
-    // IMPORTANT: do not toggle MediaStreamTrack.enabled here. On iOS/Safari that
-    // can reconfigure the active media/audio session and disturb Common's main
-    // soundtrack. Keep capture + RTP continuously alive and gate only amplitude.
-    if(!intercomGain || !intercomAudioContext) return;
+    if(!stream) return;
     try{
-      const now = intercomAudioContext.currentTime;
-      intercomGain.gain.cancelScheduledValues(now);
-      intercomGain.gain.setValueAtTime(enabled ? 1 : 0, now);
-    }catch(_e){
-      try{ intercomGain.gain.value = enabled ? 1 : 0; }catch(__e){}
-    }
-  }
-
-  async function ensurePersistentAudioGate(){
-    if(stream && intercomGain && intercomAudioContext && micStream) return true;
-
-    if(!micStream){
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-        video:false
+      stream.getAudioTracks().forEach(track => {
+        track.enabled = !!enabled;
       });
-    }
-
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if(!AudioContextCtor) throw new Error("Web Audio unavailable for persistent intercom gate");
-
-    if(!intercomAudioContext || intercomAudioContext.state === "closed"){
-      intercomAudioContext = new AudioContextCtor({latencyHint:"interactive"});
-    }
-    if(intercomAudioContext.state === "suspended"){
-      await intercomAudioContext.resume();
-    }
-
-    if(!intercomMicSource || !intercomGain || !intercomDestination){
-      intercomMicSource = intercomAudioContext.createMediaStreamSource(micStream);
-      intercomGain = intercomAudioContext.createGain();
-      intercomDestination = intercomAudioContext.createMediaStreamDestination();
-      intercomGain.gain.value = 0;
-      intercomMicSource.connect(intercomGain);
-      intercomGain.connect(intercomDestination);
-      stream = intercomDestination.stream;
-    }
-
-    // The raw mic track remains enabled for the whole show. The outgoing WebRTC
-    // stream therefore continues to carry RTP silence while Broadcast is off.
-    try{ micStream.getAudioTracks().forEach(track => { track.enabled = true; }); }catch(_e){}
-    setMicEnabled(false);
-    return true;
+    }catch(_e){}
   }
 
   async function ensurePersistentMedia(){
@@ -2995,9 +2963,15 @@
       try{
         set("Preparing persistent intercom…");
 
-        // Establish one continuous capture + RTP path before the show. Broadcast
-        // later changes only the gain gate; it never toggles or recreates media.
-        await ensurePersistentAudioGate();
+        if(!stream){
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
+            video:false
+          });
+        }
+
+        // Keep capture alive for the whole show, but begin logically muted.
+        setMicEnabled(false);
 
         if(!mediaPeer || mediaPeer.destroyed){
           mediaPeer = new Peer();
@@ -3014,8 +2988,23 @@
             mediaPeer.on("error", done(reject));
           });
 
-          mediaPeer.on("open", () => { lastPeerEvent = "open"; });
-          mediaPeer.on("disconnected", () => { lastPeerEvent = "disconnected"; });
+          mediaPeer.on("open", () => {
+            lastPeerEvent = "open";
+            // Re-run reconciliation immediately after signaling returns so any
+            // calls that truly failed can be replaced without waiting for polling.
+            if(persistentMediaReady) reconcilePersistentConnections();
+          });
+          mediaPeer.on("disconnected", () => {
+            lastPeerEvent = "disconnected";
+            // PeerJS reconnect() restores signaling while preserving this peer ID.
+            // Do not close calls or recreate microphone/media resources here.
+            if(!mediaPeer.destroyed){
+              try{
+                lastPeerEvent = "reconnecting";
+                mediaPeer.reconnect();
+              }catch(_e){}
+            }
+          });
           mediaPeer.on("close", () => { lastPeerEvent = "close"; });
           mediaPeer.on("error", e => {
             const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
@@ -3095,21 +3084,6 @@
     if(stream){
       try{ stream.getTracks().forEach(t => t.stop()); }catch(_e){}
       stream = null;
-    }
-
-    if(micStream){
-      try{ micStream.getTracks().forEach(t => t.stop()); }catch(_e){}
-      micStream = null;
-    }
-
-    try{ if(intercomMicSource) intercomMicSource.disconnect(); }catch(_e){}
-    try{ if(intercomGain) intercomGain.disconnect(); }catch(_e){}
-    intercomMicSource = null;
-    intercomGain = null;
-    intercomDestination = null;
-    if(intercomAudioContext){
-      try{ intercomAudioContext.close(); }catch(_e){}
-      intercomAudioContext = null;
     }
 
     if(mediaPeer){
