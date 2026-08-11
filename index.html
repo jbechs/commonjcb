@@ -172,96 +172,49 @@
     .godMicButton.live{ background:#000; color:#fff; }
     .godMicStatus{ font-size:.82rem; color:#d8aeb2; min-height:1.2em; }
 
-  
-    /* v6 Manager compact viewport polish */
-    body{
-      min-height:100dvh;
-      box-sizing:border-box;
-      align-items:start;
-      justify-items:center;
-      padding:18px 0 10px;
-      overflow-x:hidden;
-    }
-    .container{
-      gap:12px;
-      margin:0 auto;
-      padding-bottom:4px;
-    }
-    .godMicControls{
-      margin-bottom:24px;
-    }
-    .header{
-      margin-bottom:18px;
-    }
 
   
-    /* v6 Manager mobile scroll fix: content-height body, viewport-height canvas */
+    /* v6 Manager native mobile scroll
+       Keep the browser's own page-scrolling/pull-to-refresh behavior. */
     html{
       min-height:100%;
       background:#240507;
       background-image:radial-gradient(circle at 50% 40%, #5a151b 0%, #31090d 50%, #130204 100%);
       background-attachment:fixed;
     }
+
     body{
-      min-height:0 !important;
+      margin:0 !important;
+      min-height:100vh !important;
+      min-height:100svh !important;
       height:auto !important;
       display:block !important;
-      margin:0;
-      padding:18px 0 10px !important;
+      padding:18px 0 calc(10px + env(safe-area-inset-bottom)) !important;
       background:transparent !important;
       background-image:none !important;
-      overflow-x:hidden;
-      overflow-y:auto;
-      box-sizing:border-box;
-    }
-    .container{
-      width:min(90vw,420px);
-      margin:0 auto !important;
-      padding:0 0 4px !important;
-      box-sizing:border-box;
-    }
-
-  
-    /* v6 Manager definitive mobile-scroll model
-       The document itself never scrolls. Only actual Manager content may scroll. */
-    html{
-      width:100%;
-      height:100%;
-      overflow:hidden !important;
-      background:#240507;
-      background-image:radial-gradient(circle at 50% 40%, #5a151b 0%, #31090d 50%, #130204 100%);
-    }
-
-    body{
-      width:100%;
-      height:100%;
-      min-height:0 !important;
-      margin:0 !important;
-      padding:0 !important;
-      overflow:hidden !important;
-      display:block !important;
-      background:transparent !important;
+      overflow-x:hidden !important;
+      overflow-y:visible !important;
       box-sizing:border-box;
     }
 
     .container{
       width:min(90vw,420px) !important;
       height:auto !important;
-      max-height:100svh;
-      max-height:100dvh;
+      min-height:0 !important;
+      max-height:none !important;
       margin:0 auto !important;
-      padding:18px 0 10px !important;
+      padding:0 0 4px !important;
+      overflow:visible !important;
       box-sizing:border-box;
-      overflow-x:hidden;
-      overflow-y:auto;
-      overscroll-behavior-y:contain;
-      -webkit-overflow-scrolling:touch;
-      scrollbar-gutter:stable both-edges;
+      gap:12px;
     }
 
-    /* Keep ordinary collapsed Manager state visually compact. */
-    .container:not(:has(.diagnosticsPanel:not(.hidden))){
-      overscroll-behavior-y:none;
+    .godMicControls{
+      margin-bottom:24px;
+    }
+
+    .header{
+      margin-bottom:18px;
     }
 
   </style>
