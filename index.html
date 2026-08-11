@@ -184,7 +184,7 @@
     </div>
     <div class="header">
       <h1>common manager</h1>
-      <div class="subtitle">v5</div>
+      <div class="subtitle">v6</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -201,7 +201,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="godMicDiagnostics" class="timingProbe">Intercom — Broadcast ready</div>
+      <div id="godMicDiagnostics" class="timingProbe">Intercom — session not armed</div>
     </div>
 
 
@@ -2325,7 +2325,13 @@
 </div>
 <script>
 (() => {
-  const PRESENCE_CHANNEL = 'common-presence-3651686aed';
+  let PRESENCE_CHANNEL = null;
+
+  function intercomChannelForStartValue(value){
+    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
+    return clean ? `common-v6-${clean}` : null;
+  }
+
   const MEDIA_CHANNEL = 'common-presence-3651686aed-media';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
@@ -2371,9 +2377,20 @@
     });
   };
 
-  const openPresence = () => {
+  const openPresence = (channel) => {
+    if(!channel){ set("Manager session needs a Start Time"); return; }
     if(!window.Peer){ set("PeerJS unavailable"); return; }
-    set("Opening manager channel…");
+
+    // If this page is re-armed for a different session, retire only the old
+    // presence roster. Common playback/sync remains untouched.
+    if(presencePeer){
+      try{ presencePeer.destroy(); }catch(_e){}
+      presencePeer = null;
+      receivers.clear();
+    }
+
+    PRESENCE_CHANNEL = channel;
+    set("Opening manager session…");
     presencePeer = new Peer(PRESENCE_CHANNEL);
 
     presencePeer.on("open", () => {
@@ -2382,13 +2399,11 @@
     });
     presencePeer.on("connection", registerReceiver);
     presencePeer.on("disconnected", () => {
-      // Presence signaling may wobble when iOS activates the microphone.
-      // Do not use this peer for media; just try to restore roster signaling.
       if(!broadcasting) set("Manager presence reconnecting…");
       try{ presencePeer.reconnect(); }catch(_e){}
     });
     presencePeer.on("error", e => {
-      if(e && e.type === "unavailable-id") set("Manager channel already in use");
+      if(e && e.type === "unavailable-id") set("Manager session already in use");
       else if(!broadcasting) set("Manager presence error: " + (e.type || e.message || "unknown"));
     });
   };
@@ -2399,45 +2414,126 @@
       try{
         const call = mediaPeer.call(receiverId, stream);
         calls.set(receiverId, call);
-        call.on("close", () => calls.delete(receiverId));
-        call.on("error", () => calls.delete(receiverId));
+        call.on("close", () => {
+          calls.delete(receiverId);
+          if(broadcasting) set(`LIVE · ${receiverCountText()}`);
+        });
+        call.on("error", () => {
+          calls.delete(receiverId);
+          if(broadcasting && calls.size > 0){
+            set(`LIVE · ${receiverCountText()}`);
+            if(diag) diag.textContent =
+              `Intercom — LIVE · ${receiverCountText()} · one media call warning`;
+          }else if(broadcasting){
+            set("Broadcast interrupted");
+          }
+        });
       }catch(_e){}
     });
     set(`LIVE · ${receiverCountText()}`);
   };
 
+  const endBroadcast = () => {
+    // End only the disposable media session. Presence/receiver roster remains
+    // alive so another Broadcast can begin immediately without participants
+    // reconnecting or touching Common sync.
+    broadcasting = false;
+
+    calls.forEach(call => {
+      try{ call.close(); }catch(_e){}
+    });
+    calls.clear();
+
+    if(stream){
+      try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
+      stream = null;
+    }
+
+    if(mediaPeer){
+      try{ mediaPeer.destroy(); }catch(_e){}
+      mediaPeer = null;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Broadcast";
+    updateReady();
+  };
+
   btn.disabled = true;
-  openPresence();
+  set("Press Begin to arm intercom session");
+
+  const managerBegin = document.getElementById("playButton");
+  const managerStartField = document.getElementById("startTime");
+  if(managerBegin){
+    managerBegin.addEventListener("click", () => {
+      const channel = intercomChannelForStartValue(
+        managerStartField && managerStartField.value
+      );
+      openPresence(channel);
+    }, {once:true, capture:true});
+  }
 
   btn.addEventListener("click", async () => {
-    if(broadcasting) return;
+    if(broadcasting){
+      endBroadcast();
+      return;
+    }
 
     btn.disabled = true;
     set("Requesting microphone…");
 
     try{
-      // Acquire mic FIRST. This is the ordering already proven to work.
+      // Acquire mic FIRST. Each broadcast then gets a brand-new anonymous
+      // media peer, avoiding stale/reused media-peer IDs between sessions.
       stream = await navigator.mediaDevices.getUserMedia({
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
         video:false
       });
 
       set("Opening broadcast media channel…");
-      mediaPeer = new Peer(MEDIA_CHANNEL);
+      mediaPeer = new Peer();
 
       mediaPeer.on("open", () => {
         broadcasting = true;
-        btn.textContent = "Broadcasting";
+        btn.disabled = false;
+        btn.textContent = "End Broadcast";
         placeMediaCalls();
       });
 
       mediaPeer.on("error", e => {
-        set("Broadcast peer error: " + (e.type || e.message || "unknown"));
+        const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
+
+        if(broadcasting && calls.size > 0 && kind === "network"){
+          if(diag) diag.textContent =
+            `Intercom — LIVE · ${receiverCountText()} · media peer network warning`;
+          set(`LIVE · ${receiverCountText()}`);
+          return;
+        }
+
+        // If startup itself fails, cleanly retire this media session but keep
+        // presence intact so the operator can immediately try Broadcast again.
+        set("Broadcast peer error: " + kind);
+        calls.clear();
+        if(stream){
+          try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
+          stream = null;
+        }
+        if(mediaPeer){
+          try{ mediaPeer.destroy(); }catch(_e){}
+          mediaPeer = null;
+        }
+        broadcasting = false;
         btn.disabled = false;
+        btn.textContent = "Broadcast";
       });
     }catch(e){
       set("Mic error: " + (e.message || e));
+      if(stream){
+        try{ stream.getTracks().forEach(track => track.stop()); }catch(_e){}
+        stream = null;
+      }
       btn.disabled = false;
+      btn.textContent = "Broadcast";
     }
   });
 })();
