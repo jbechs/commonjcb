@@ -1546,49 +1546,6 @@
 
         setStatus(reason);
     
-    // TEMPORARY EXACT GOLDEN BROADCAST TEST
-    let manualBroadcastPeer = null;
-    let manualBroadcastStream = null;
-    let manualBroadcastCalls = new Map();
-    godMicButton.addEventListener("click", async (ev)=>{
-      ev.stopImmediatePropagation();
-      if(manualBroadcastPeer) return;
-      godMicButton.disabled = true;
-      setGodMicStatus("Requesting microphone…");
-      try{
-        manualBroadcastStream = await navigator.mediaDevices.getUserMedia({
-          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-          video:false
-        });
-        setGodMicStatus("Opening broadcast channel…");
-        manualBroadcastPeer = new Peer(INTERCOM_HOST_ID);
-        manualBroadcastPeer.on("open", ()=>{
-          setGodMicStatus("LIVE · 0 receivers connected");
-          godMicButton.textContent = "Broadcasting";
-          godMicButton.disabled = true;
-        });
-        manualBroadcastPeer.on("connection", conn=>{
-          conn.on("open", ()=>{
-            try{ conn.send({type:"listener-ready"}); }catch(_err){}
-            const call = manualBroadcastPeer.call(conn.peer, manualBroadcastStream);
-            manualBroadcastCalls.set(conn.peer, call);
-            try{ conn.send({type:"mic-state", live:true}); }catch(_err){}
-            setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
-            call.on("close", ()=>{
-              manualBroadcastCalls.delete(conn.peer);
-              setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
-            });
-          });
-        });
-        manualBroadcastPeer.on("error", err=>{
-          setGodMicStatus("Peer error: " + (err.type || err.message || "unknown"));
-          godMicButton.disabled = false;
-        });
-      }catch(err){
-        setGodMicStatus("Mic error: " + (err.message || err));
-        godMicButton.disabled = false;
-      }
-    }, true);
 
     updateTransport();
         updateDriftStats();
@@ -2451,6 +2408,50 @@
       }catch(err){ godMicButton.disabled=false; setGodMicStatus(`Broadcast unavailable: ${err.message||"unknown"}`); }
     }
     godMicButton.addEventListener("click", startGodMic);
+
+    // TEMPORARY EXACT GOLDEN BROADCAST TEST
+    let manualBroadcastPeer = null;
+    let manualBroadcastStream = null;
+    let manualBroadcastCalls = new Map();
+    godMicButton.addEventListener("click", async (ev)=>{
+      ev.stopImmediatePropagation();
+      if(manualBroadcastPeer) return;
+      godMicButton.disabled = true;
+      setGodMicStatus("Requesting microphone…");
+      try{
+        manualBroadcastStream = await navigator.mediaDevices.getUserMedia({
+          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
+          video:false
+        });
+        setGodMicStatus("Opening broadcast channel…");
+        manualBroadcastPeer = new Peer(INTERCOM_HOST_ID);
+        manualBroadcastPeer.on("open", ()=>{
+          setGodMicStatus("LIVE · 0 receivers connected");
+          godMicButton.textContent = "Broadcasting";
+          godMicButton.disabled = true;
+        });
+        manualBroadcastPeer.on("connection", conn=>{
+          conn.on("open", ()=>{
+            try{ conn.send({type:"listener-ready"}); }catch(_err){}
+            const call = manualBroadcastPeer.call(conn.peer, manualBroadcastStream);
+            manualBroadcastCalls.set(conn.peer, call);
+            try{ conn.send({type:"mic-state", live:true}); }catch(_err){}
+            setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
+            call.on("close", ()=>{
+              manualBroadcastCalls.delete(conn.peer);
+              setGodMicStatus(`LIVE · ${manualBroadcastCalls.size} receiver${manualBroadcastCalls.size===1?"":"s"} connected`);
+            });
+          });
+        });
+        manualBroadcastPeer.on("error", err=>{
+          setGodMicStatus("Peer error: " + (err.type || err.message || "unknown"));
+          godMicButton.disabled = false;
+        });
+      }catch(err){
+        setGodMicStatus("Mic error: " + (err.message || err));
+        godMicButton.disabled = false;
+      }
+    }, true);
 
     updateTransport();
     updateDriftStats();
