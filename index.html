@@ -194,6 +194,33 @@
       margin-bottom:18px;
     }
 
+  
+    /* v6 Manager mobile scroll fix: content-height body, viewport-height canvas */
+    html{
+      min-height:100%;
+      background:#240507;
+      background-image:radial-gradient(circle at 50% 40%, #5a151b 0%, #31090d 50%, #130204 100%);
+      background-attachment:fixed;
+    }
+    body{
+      min-height:0 !important;
+      height:auto !important;
+      display:block !important;
+      margin:0;
+      padding:18px 0 10px !important;
+      background:transparent !important;
+      background-image:none !important;
+      overflow-x:hidden;
+      overflow-y:auto;
+      box-sizing:border-box;
+    }
+    .container{
+      width:min(90vw,420px);
+      margin:0 auto !important;
+      padding:0 0 4px !important;
+      box-sizing:border-box;
+    }
+
   </style>
 </head>
 
