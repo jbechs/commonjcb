@@ -169,7 +169,7 @@
       font-size:1.08rem; padding:14px 18px; min-width:190px;
       background:#fff; color:#2b0508;
     }
-    .godMicButton.live{ background:#ffd9dc; }
+    .godMicButton.live{ background:#000; color:#fff; }
     .godMicStatus{ font-size:.82rem; color:#d8aeb2; min-height:1.2em; }
 
   </style>
@@ -179,7 +179,7 @@
 
   <main class="container">
     <div class="godMicControls">
-      <button id="godMicButton" class="godMicButton" type="button">Broadcast</button>
+      <button id="godMicButton" class="godMicButton" type="button" style="background:#000;color:#fff;border:1px solid rgba(255,255,255,.22)">Broadcast</button>
       <div id="godMicStatus" class="godMicStatus">Broadcast ready</div>
     </div>
     <div class="header">
@@ -2317,113 +2317,17 @@
 
 
 
-    // --- COMMON MANAGER GOD MIC (golden handshake) ----------------------
-    // Broadcast layer only. Common's v5 sync/player code above is unchanged.
-    const oldGodMicButton = document.getElementById("godMicButton");
-    const godMicButton = oldGodMicButton.cloneNode(true);
-    oldGodMicButton.replaceWith(godMicButton);
-    const godMicStatus = document.getElementById("godMicStatus");
-    const godMicDiagnostics = document.getElementById("godMicDiagnostics");
-    const INTERCOM_HOST_ID = "common-manual-c2954238e75e";
-    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
-    const GOD_MIC_GAIN = Math.pow(10, 5/20);
-
-    let godMicPeer = null;
-    let godMicRawStream = null;
-    let godMicBroadcastStream = null;
-    let godMicAudioContext = null;
-    let godMicConnections = new Map();
-    let godMicCalls = new Map();
-    let godMicStarted = false;
-    let godMicMuted = false;
-    let godMicLibraryPromise = null;
-
-    function godMicLog(text){ if(godMicDiagnostics) godMicDiagnostics.textContent = `Intercom — ${text}`; }
-    function setGodMicStatus(text){ godMicStatus.textContent = text; }
-    function refreshGodMicStatus(){
-      const n = godMicConnections.size;
-      if(!godMicStarted) setGodMicStatus("Broadcast ready");
-      else setGodMicStatus(`${godMicMuted ? "MUTED" : "LIVE"} · ${n} receiver${n===1?"":"s"} connected`);
-    }
-    function loadGodMicLibrary(){
-      return window.Peer ? Promise.resolve() : Promise.reject(new Error("PeerJS unavailable"));
-    }
-    function sendMicState(){
-      for(const conn of godMicConnections.values()){
-        try{ conn.send({type:"mic-state", live:godMicStarted && !godMicMuted}); }catch(_err){}
-      }
-    }
-    function applyGodMicMute(){
-      if(godMicBroadcastStream) for(const track of godMicBroadcastStream.getAudioTracks()) track.enabled = !godMicMuted;
-      godMicButton.textContent = godMicMuted ? "Unmute Broadcast" : "Mute Broadcast";
-      godMicButton.classList.toggle("live", !godMicMuted);
-      sendMicState(); refreshGodMicStatus();
-    }
-    async function buildBoostedMicStream(raw){
-      try{
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if(!AC) return raw;
-        godMicAudioContext = new AC();
-        await godMicAudioContext.resume();
-        const source = godMicAudioContext.createMediaStreamSource(raw);
-        const gain = godMicAudioContext.createGain(); gain.gain.value = GOD_MIC_GAIN;
-        const dest = godMicAudioContext.createMediaStreamDestination();
-        source.connect(gain).connect(dest);
-        godMicLog("microphone boosted +5 dB");
-        return dest.stream;
-      }catch(_err){ godMicLog("+5 dB boost unavailable · raw mic"); return raw; }
-    }
-    async function startGodMic(){
-      if(godMicStarted){ godMicMuted=!godMicMuted; applyGodMicMute(); return; }
-      godMicButton.disabled=true; setGodMicStatus("Requesting microphone…");
-      try{
-        godMicRawStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
-        godMicBroadcastStream = await buildBoostedMicStream(godMicRawStream);
-        await loadGodMicLibrary();
-        godMicPeer = new Peer(INTERCOM_HOST_ID);
-        godMicPeer.on("open", id=>{
-          godMicStarted=true; godMicMuted=false; godMicButton.disabled=false; applyGodMicMute(); godMicLog(`manager peer open ${id}`);
-        });
-        // GOLDEN PATH: incoming reliable connection opens first; only then place media call.
-        godMicPeer.on("connection", conn=>{
-          conn.on("open", ()=>{
-            godMicConnections.set(conn.peer, conn);
-            try{ conn.send({type:"mic-state", live:!godMicMuted}); }catch(_err){}
-            if(godMicBroadcastStream){
-              const call = godMicPeer.call(conn.peer, godMicBroadcastStream);
-              godMicCalls.set(conn.peer, call);
-              call.on("close", ()=> godMicCalls.delete(conn.peer));
-            }
-            refreshGodMicStatus();
-          });
-          const remove=()=>{ godMicConnections.delete(conn.peer); godMicCalls.delete(conn.peer); refreshGodMicStatus(); };
-          conn.on("close", remove); conn.on("error", remove);
-        });
-        godMicPeer.on("error", err=>{
-          godMicButton.disabled=false;
-          const type=err && (err.type||err.message) ? (err.type||err.message) : "unknown";
-          godMicLog(`manager peer error: ${type}`);
-          setGodMicStatus(err && err.type==="unavailable-id" ? "Broadcast channel already in use" : `Broadcast error: ${type}`);
-        });
-      }catch(err){ godMicButton.disabled=false; setGodMicStatus(`Broadcast unavailable: ${err.message||"unknown"}`); }
-    }
-    godMicButton.addEventListener("click", startGodMic);
-
-
     updateTransport();
     updateDriftStats();
     updateTimingProbe();
   </script>
 
-<div id="isoIntercomRed" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
-  <button id="isoBroadcastBtn" type="button" style="background:#000;color:#fff;border:1px solid rgba(255,255,255,.22)">Broadcast</button>
-  <div id="isoRedStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Broadcast ready</div>
 </div>
 <script>
 (() => {
   const CHANNEL = 'common-isolated-a584b0e44c2d';
-  const btn = document.getElementById("isoBroadcastBtn");
-  const status = document.getElementById("isoRedStatus");
+  const btn = document.getElementById("godMicButton");
+  const status = document.getElementById("godMicStatus");
   let peer = null, stream = null;
   const calls = new Map();
   const set = t => status.textContent = t;
