@@ -183,7 +183,7 @@
       <div id="godMicStatus" class="godMicStatus">Broadcast ready</div>
     </div>
     <div class="header">
-      <h1>common manager</h1>
+      <h1>common<br><span style="display:block">manager</span></h1>
       <div class="subtitle">v6</div>
     </div>
 
@@ -202,6 +202,7 @@
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
       <div id="godMicDiagnostics" class="timingProbe">Intercom — session not armed</div>
+      <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
 
@@ -2332,10 +2333,26 @@
     return clean ? `common-v6-${clean}` : null;
   }
 
+  function frozenIntercomChannelForStartValue(value){
+    const requested = intercomChannelForStartValue(value);
+    let frozen = null;
+    try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
+    const channel = frozen || requested;
+
+    if(channel && !frozen){
+      try{ sessionStorage.setItem(SESSION_KEY, channel); }catch(_e){}
+    }
+
+    if(sessionDiag) sessionDiag.textContent = "Session: " + (channel || "—");
+    return channel;
+  }
+
   const MEDIA_CHANNEL = 'common-presence-3651686aed-media';
   const btn = document.getElementById("godMicButton");
   const status = document.getElementById("godMicStatus");
   const diag = document.getElementById("godMicDiagnostics");
+  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
+  const SESSION_KEY = "common-v6-intercom-session";
 
   let presencePeer = null;
   let mediaPeer = null;
@@ -2348,6 +2365,10 @@
     status.textContent = t;
     if(diag) diag.textContent = "Intercom — " + t;
   };
+  try{
+    const stored = sessionStorage.getItem(SESSION_KEY);
+    if(stored && sessionDiag) sessionDiag.textContent = "Session: " + stored;
+  }catch(_e){}
 
   const receiverCountText = () =>
     `${receivers.size} receiver${receivers.size === 1 ? "" : "s"} connected`;
@@ -2466,7 +2487,7 @@
   const managerStartField = document.getElementById("startTime");
   if(managerBegin){
     managerBegin.addEventListener("click", () => {
-      const channel = intercomChannelForStartValue(
+      const channel = frozenIntercomChannelForStartValue(
         managerStartField && managerStartField.value
       );
       openPresence(channel);
