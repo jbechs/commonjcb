@@ -2411,6 +2411,12 @@
            now <= (startMs + SESSION_LATE_MS);
   }
 
+  function storedSessionIsActuallyUnderway(snapshot){
+    if(!storedSessionIsLive(snapshot)) return false;
+    const startMs = new Date(snapshot.startValue).getTime();
+    return Number.isFinite(startMs) && Date.now() >= startMs;
+  }
+
   function clearStoredIntercomSession(){
     try{
       sessionStorage.removeItem(SESSION_KEY);
@@ -2503,16 +2509,17 @@
     const snapshot = storedSessionSnapshot();
     const wasManagerArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1";
 
-    if(wasManagerArmed && storedSessionIsLive(snapshot)){
-      // Genuine Manager refresh/rejoin: restore the show that had actually begun.
+    if(wasManagerArmed && storedSessionIsActuallyUnderway(snapshot)){
+      // True mid-show recovery: the scheduled show has actually started,
+      // so restore its original time/session.
       sessionId = snapshot.id;
       if(startField && snapshot.startValue){
         startField.value = snapshot.startValue;
       }
       if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
     }else{
-      // Ordinary refresh before Manager Begin: do NOT inherit an old room.
-      // Leave Common's existing >60-second whole-minute default untouched.
+      // Setup/preshow/ordinary refresh: keep the player's freshly generated
+      // next-whole-minute >60s default rather than restoring an old session.
       clearStoredIntercomSession();
       sessionId = null;
       const proposed = intercomChannelForStartValue(startField && startField.value);
