@@ -174,7 +174,7 @@
 
 
   
-    /* v6 Manager native mobile scroll
+    /* v8 Manager native mobile scroll
        Keep the browser's own page-scrolling/pull-to-refresh behavior. */
     html{
       min-height:100%;
@@ -459,7 +459,7 @@
     </div>
     <div class="header">
       <h1>common<br><span style="display:block">manager</span></h1>
-      <div class="subtitle">v6</div>
+      <div class="subtitle">v8</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -2581,7 +2581,48 @@
 
     audio.addEventListener("pause", handleUnexpectedPerformancePause);
 
-    audio.addEventListener("ended", ()=>{
+    // Sanity-check native media "ended" before allowing it to end Common.
+    // Some iPhones appear able to emit a premature ended event during startup/seek.
+    // The canonical show clock is the authority: an ended event is accepted only
+    // when both the scheduled timeline and the media playhead are genuinely near
+    // the end of the loaded program. Otherwise we treat it as spurious and recover.
+    audio.addEventListener("ended", async ()=>{
+      const expectedSec = getExpectedTrackTimeSec();
+      const durationSec = Number(audio.duration);
+      const currentSec = Number(audio.currentTime);
+      const END_SANITY_MARGIN_SEC = 3;
+
+      const durationKnown = Number.isFinite(durationSec) && durationSec > 0;
+      const expectedNearEnd = durationKnown && Number.isFinite(expectedSec) &&
+        expectedSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const playheadNearEnd = durationKnown && Number.isFinite(currentSec) &&
+        currentSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const acceptEnded = durationKnown && expectedNearEnd && playheadNearEnd;
+
+      if(!acceptEnded){
+        const expectedText = Number.isFinite(expectedSec) ? expectedSec.toFixed(2) : "—";
+        const currentText = Number.isFinite(currentSec) ? currentSec.toFixed(2) : "—";
+        const durationText = durationKnown ? durationSec.toFixed(2) : "—";
+
+        setStatus("Recovering playback…");
+        setDebug(`${lastClockSyncDebug || "Clock prepared"} · Ignored premature ended event · expected ${expectedText}s · media ${currentText}s / ${durationText}s`);
+
+        if(scheduledAnchorMs != null){
+          try{
+            const recovered = await startPlaybackAtCurrentCorrectOffset();
+            if(!recovered) showStartNow();
+          }catch(err){
+            setStatus("Playback interrupted — tap Begin");
+            setDebug(`${lastClockSyncDebug || "Clock prepared"} · Premature ended recovery failed: ${err.message}`);
+            showStartNow();
+          }
+        }else{
+          setStatus("Playback interrupted — tap Begin");
+          showStartNow();
+        }
+        return;
+      }
+
       clearTimers();
       clearPlaybackMonitors();
       clearCrossfade();
@@ -2594,12 +2635,16 @@
 
       setCountdown("");
       setStatus("Playback ended");
-      setDebug(lastClockSyncDebug || "");
+      setDebug(`${lastClockSyncDebug || ""} · End verified by clock + playhead.`);
 
       showPlayer();
       updateTransport();
 
-      // Reveal credits only after the show has ended.
+      // Mark a verified completed performance. The intercom remains alive through
+      // credits, but a refresh from this state will clear the completed session.
+      try{ sessionStorage.setItem("common-v8-manager-postshow-complete", "1"); }catch(_e){}
+
+      // Reveal credits only after the show has genuinely ended.
       const postShowSection = document.getElementById("postShowSection");
       if(postShowSection) postShowSection.classList.remove("hidden");
     });
@@ -2655,8 +2700,20 @@
   const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
   const SESSION_KEY = 'common-v6-intercom-session';
   const MANAGER_ARMED_KEY = "common-v6-manager-armed";
+  const POSTSHOW_COMPLETE_KEY = "common-v8-manager-postshow-complete";
 
   const SESSION_START_KEY = "common-v6-intercom-start-value";
+
+  // Refresh during a live show preserves the intercom session. Refresh after a
+  // verified end state starts clean instead.
+  try{
+    if(sessionStorage.getItem(POSTSHOW_COMPLETE_KEY) === "1"){
+      sessionStorage.removeItem(SESSION_KEY);
+      sessionStorage.removeItem(SESSION_START_KEY);
+      sessionStorage.removeItem(MANAGER_ARMED_KEY);
+      sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
+    }
+  }catch(_e){}
   const SESSION_EARLY_MS = 10 * 60 * 1000;
   const SESSION_LATE_MS = 30 * 60 * 1000;
 
@@ -2719,24 +2776,16 @@
   const begin = document.getElementById("playButton");
   const startField = document.getElementById("startTime");
   const programAudio = document.getElementById("audio");
-  if(programAudio){
-    programAudio.addEventListener("ended", () => {
-      try{
-        sessionStorage.removeItem(SESSION_KEY);
-        sessionStorage.removeItem(SESSION_START_KEY);
-        sessionStorage.removeItem(MANAGER_ARMED_KEY);
-      }catch(_e){}
-      sessionId = null;
-      if(sessionDiag) sessionDiag.textContent = "Session: —";
-      teardownPersistentMedia();
-      set("Show ended · refresh for next session");
-    });
-  }
+  // Do not tear down the manager intercom when the soundtrack ends.
+  // The god mic remains available over the verified post-show/credits state.
   let intercomStartDirty = false;
   if(startField){
     const markNewShow = () => {
       intercomStartDirty = true;
-      try{ sessionStorage.removeItem(MANAGER_ARMED_KEY); }catch(_e){}
+      try{
+        sessionStorage.removeItem(MANAGER_ARMED_KEY);
+        sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
+      }catch(_e){}
     };
     startField.addEventListener("input", markNewShow);
     startField.addEventListener("change", markNewShow);
@@ -2900,6 +2949,7 @@
         sessionStorage.removeItem(MANAGER_ARMED_KEY);
         sessionStorage.removeItem(SESSION_KEY);
         sessionStorage.removeItem(SESSION_START_KEY);
+        sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
       }
     }catch(_e){}
     const frozen = freezeSession(startField && startField.value);
