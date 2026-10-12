@@ -2731,6 +2731,7 @@
  const rooms={audience:null,managers:null};
  const received={audience:new Map(),managers:new Map()};
  const remoteAudio=new Map();
+ const preparedMics={audience:null,managers:null};
  const backbone=document.getElementById('audio');
  const MAX_TALK_MS=60000;
  let sessionId=null, passphrase='',active=null, holdToken=0, holding=false, cutoff=null;
@@ -2846,6 +2847,33 @@
    buttons[kind].disabled=false;
    status(kind,'Connected · hold to transmit');window.commonV9Diag?.set('connection','Connected');window.commonV9Diag?.set('room','Audience + Managers');window.commonV9Diag?.event(kind+' room connected');
  }
+ // Pre-show microphone preparation. Capture occurs during Manager's explicit
+ // Begin action, but tracks are muted BEFORE publication to either room.
+ // Keep capture available across PTT releases (stopMicTrackOnMute:false) so
+ // Safari needn't renegotiate its audio session at the first broadcast.
+ async function prepareMicrophones(){
+   for(const kind of ['audience','managers']){
+     const room=rooms[kind];
+     if(!room || room.state!=='connected')continue;
+     let track=null;
+     try{
+       status(kind,'Preparing microphone (muted)…');
+       track=await lk.createLocalAudioTrack();
+       await track.mute();
+       await room.localParticipant.publishTrack(track,{
+         source:lk.Track.Source.Microphone,
+         stopMicTrackOnMute:false
+       });
+       preparedMics[kind]=track;
+       status(kind,'Ready · hold to transmit');
+       window.commonV9Diag?.event(kind+' microphone prepared and muted');
+     }catch(error){
+       try{track?.stop();}catch(_e){}
+       status(kind,'Mic preparation failed · hold to retry');
+       window.commonV9Diag?.set('error',error?.message||error);
+     }
+   }
+ }
  async function stop(reason='Connected · hold to transmit'){
    ++holdToken;
    holding=false;
@@ -2894,6 +2922,8 @@
      for(const k of ['audience','managers']){
        buttons[k].disabled=true;
        if(rooms[k]){await rooms[k].disconnect();rooms[k]=null;}
+       try{preparedMics[k]?.stop();}catch(_e){}
+       preparedMics[k]=null;
        received[k].clear();
      }
      sessionId=next;
@@ -2901,7 +2931,12 @@
      for(const k of ['audience','managers']){
        try{await connect(k);}catch(err){status(k,'Connection error: '+(err?.message||err));}
      }
-     say('Live communications isolated from the show clock');
+     for(const kind of ['audience','managers'])buttons[kind].disabled=true;
+     // Browser microphone permission is deliberately requested before
+     // performance, never as a surprise on the first press-and-hold.
+     await prepareMicrophones();
+     for(const kind of ['audience','managers'])buttons[kind].disabled=!(rooms[kind]?.state==='connected');
+     say('Live communications ready · microphones muted');
    }finally{connecting=false;duck();}
  }
  for(const kind of ['audience','managers']){
