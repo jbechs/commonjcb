@@ -445,6 +445,16 @@
     }
 
 
+  
+    /* V9 channel UI. Transmit disabled until authenticated transports are installed. */
+    .v9Channels{display:grid;gap:15px;margin-bottom:23px}
+    .v9Channel{display:grid;gap:8px;padding:15px 13px;border:1px solid rgba(255,255,255,.20);border-radius:9px;background:rgba(0,0,0,.18)}
+    .v9ChannelName{font-size:.72rem;letter-spacing:.12em;color:#e3bcc0;font-weight:600}
+    .v9ChannelButton{justify-self:stretch;min-width:0;width:100%;font-size:1rem;background:#fff;color:#27080b;padding:15px 12px;touch-action:none;user-select:none;-webkit-user-select:none}
+    .v9ChannelButton:disabled{opacity:.42;cursor:not-allowed}
+    .v9ChannelButton.transmitting{background:#ae202e;color:white}
+    .v9ChannelStatus{min-height:2.2em;font-size:.78rem;line-height:1.4;color:#d4b0b4}
+
   </style>
 </head>
 
@@ -453,13 +463,21 @@
 
 
   <main class="container">
-    <div class="godMicControls">
-      <button id="godMicButton" class="godMicButton" type="button" style="background:#000;color:#fff;border:1px solid rgba(255,255,255,.22)">Broadcast</button>
-      <div id="godMicStatus" class="godMicStatus">Broadcast ready</div>
+    <div class="v9Channels" aria-label="Live communications">
+      <section class="v9Channel" aria-labelledby="v9AudienceHeading">
+        <div class="v9ChannelName" id="v9AudienceHeading">AUDIENCE · ALL PARTICIPANTS</div>
+        <button id="v9AudiencePtt" class="v9ChannelButton" type="button" disabled aria-describedby="v9AudienceStatus">Hold to broadcast</button>
+        <div id="v9AudienceStatus" class="v9ChannelStatus" role="status">Not connected — one-to-many audio service required</div>
+      </section>
+      <section class="v9Channel" aria-labelledby="v9ManagersHeading">
+        <div class="v9ChannelName" id="v9ManagersHeading">MANAGERS · PRIVATE</div>
+        <button id="v9ManagersPtt" class="v9ChannelButton" type="button" disabled aria-describedby="v9ManagersStatus">Hold to talk to managers</button>
+        <div id="v9ManagersStatus" class="v9ChannelStatus" role="status">Not connected — authenticated manager channel required</div>
+      </section>
     </div>
     <div class="header">
       <h1>common<br><span style="display:block">manager</span></h1>
-      <div class="subtitle">v8</div>
+      <div class="subtitle">v9</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -473,11 +491,15 @@
     <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
     <button id="diagnosticsToggle" class="diagnosticsToggle" type="button" aria-expanded="false">info</button>
     <div id="diagnosticsPanel" class="diagnosticsPanel hidden">
+      <div id="v9AudioHealth" class="timingProbe">V9 audio: awaiting connection</div>
+      <div id="v9AudioEvents" class="timingProbe" style="white-space:pre-wrap;overflow-wrap:anywhere">Recent audio events: none</div>
+
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="godMicDiagnostics" class="timingProbe">Intercom — session not armed</div>
-      <div id="broadcastTransportDiagnostics" class="timingProbe">Broadcast transport — idle</div>
+      <div id="godMicDiagnostics" class="timingProbe">V9 intercom — inactive</div>
+      <div id="broadcastTransportDiagnostics" class="timingProbe">V9 audience transport — not configured</div>
+      <div id="v9ChannelDiagnostics" class="timingProbe">V9 manager transport — not configured · no audio is being transmitted</div>
       <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
@@ -532,8 +554,6 @@
         </div>
       </div>
   </section>
-
-  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script> 
     const AUDIO_URL = "https://eggtooth.xyz/commonperformerseptember2.mp3";
     const PRESHOW_AUDIO_URL = "https://eggtooth.xyz/preshow.mp3";
@@ -2695,799 +2715,197 @@
   </script>
 
 </div>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 <script>
+/* Common V9 PTT: microphone mute state controls ducking; transport never controls show clock. */
 (() => {
-  const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
-  const SESSION_KEY = 'common-v6-intercom-session';
-  const MANAGER_ARMED_KEY = "common-v6-manager-armed";
-  const POSTSHOW_COMPLETE_KEY = "common-v8-manager-postshow-complete";
-
-  const SESSION_START_KEY = "common-v6-intercom-start-value";
-
-  // Refresh during a live show preserves the intercom session. Refresh after a
-  // verified end state starts clean instead.
-  try{
-    if(sessionStorage.getItem(POSTSHOW_COMPLETE_KEY) === "1"){
-      sessionStorage.removeItem(SESSION_KEY);
-      sessionStorage.removeItem(SESSION_START_KEY);
-      sessionStorage.removeItem(MANAGER_ARMED_KEY);
-      sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
-    }
-  }catch(_e){}
-  const SESSION_EARLY_MS = 10 * 60 * 1000;
-  const SESSION_LATE_MS = 30 * 60 * 1000;
-
-  function parseSessionStartFromId(id){
-    const m = String(id || "").match(/^common-v6-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})$/);
-    if(!m) return null;
-    const [, y, mo, d, h, mi] = m;
-    return `${y}-${mo}-${d}T${h}:${mi}`;
-  }
-
-  function storedSessionSnapshot(){
-    let id = null;
-    let startValue = null;
-    try{
-      id = sessionStorage.getItem(SESSION_KEY);
-      startValue = sessionStorage.getItem(SESSION_START_KEY);
-    }catch(_e){}
-    if(id && !startValue) startValue = parseSessionStartFromId(id);
-    return {id, startValue};
-  }
-
-  function storedSessionIsLive(snapshot){
-    if(!snapshot || !snapshot.id || !snapshot.startValue) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    if(!Number.isFinite(startMs)) return false;
-    const now = Date.now();
-    return now >= (startMs - SESSION_EARLY_MS) &&
-           now <= (startMs + SESSION_LATE_MS);
-  }
-
-  function storedSessionIsActuallyUnderway(snapshot){
-    if(!storedSessionIsLive(snapshot)) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    return Number.isFinite(startMs) && Date.now() >= startMs;
-  }
-
-  function clearStoredIntercomSession(){
-    try{
-      sessionStorage.removeItem(SESSION_KEY);
-      sessionStorage.removeItem(SESSION_START_KEY);
-      sessionStorage.removeItem(MANAGER_ARMED_KEY);
-    }catch(_e){}
-  }
-
-  function saveIntercomSession(id, startValue){
-    try{
-      sessionStorage.setItem(SESSION_KEY, id);
-      sessionStorage.setItem(SESSION_START_KEY, startValue);
-    }catch(_e){}
-  }
-  const HEARTBEAT_MS = 8000;
-  const POLL_MS = 2000;
-
-  const btn = document.getElementById("godMicButton");
-  const status = document.getElementById("godMicStatus");
-  const diag = document.getElementById("godMicDiagnostics");
-  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
-  const transportDiag = document.getElementById("broadcastTransportDiagnostics");
-  let transportStatsTimer = null;
-  const begin = document.getElementById("playButton");
-  const startField = document.getElementById("startTime");
-  const programAudio = document.getElementById("audio");
-  // Do not tear down the manager intercom when the soundtrack ends.
-  // The god mic remains available over the verified post-show/credits state.
-  let intercomStartDirty = false;
-  if(startField){
-    const markNewShow = () => {
-      intercomStartDirty = true;
-      try{
-        sessionStorage.removeItem(MANAGER_ARMED_KEY);
-        sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
-      }catch(_e){}
-    };
-    startField.addEventListener("input", markNewShow);
-    startField.addEventListener("change", markNewShow);
-  }
-
-  let sessionId = null;
-  let managerInstanceId = null;
-  let armed = false;
-  let heartbeatTimer = null;
-  let pollTimer = null;
-  let receiverIds = new Set();
-
-  let mediaPeer = null;
-  let stream = null;
-  let broadcasting = false;
-  let persistentMediaReady = false;
-  let persistentMediaPromise = null;
-  let persistentReconcileTimer = null;
-  let mediaCallAttempts = 0;
-  let mediaCallCreateErrors = 0;
-  const calls = new Map();
-  const callHealth = new Map();
-  const controls = new Map();
-
-  const MEDIA_CALL_CONNECT_GRACE_MS = 30000;
-  // Experiment: once a call has ever been healthy, transient disconnects do not trigger replacement.
-
-  // Network/WebRTC breadcrumbs plus bounded signaling recovery.
-  // Recovery is confined to PeerJS signaling; it never touches the soundtrack,
-  // show clock, drift controller, or established WebRTC media path.
-  let lastPeerEvent = "created";
-  let lastNetworkEvent = navigator.onLine ? "online" : "offline";
-  const networkConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
-
-  function networkLabel(){
-    const bits = [navigator.onLine ? "online" : "offline"];
-    if(networkConnection){
-      if(networkConnection.type) bits.push(networkConnection.type);
-      if(networkConnection.effectiveType) bits.push(networkConnection.effectiveType);
-    }
-    return bits.join("/");
-  }
-
-  function intercomChannelForStartValue(value){
-    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
-    return clean ? `common-v6-${clean}` : null;
-  }
-
-  function freezeSession(value){
-    const requested = intercomChannelForStartValue(value);
-    const snapshot = storedSessionSnapshot();
-
-    let wasArmed = false;
-    try{ wasArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1"; }catch(_e){}
-
-    // Visible Start Time is authoritative. Only a genuine mid-show rejoin may
-    // override it with a previously armed session.
-    if(wasArmed && storedSessionIsActuallyUnderway(snapshot)){
-      sessionId = snapshot.id;
-      if(startField && snapshot.startValue && startField.value !== snapshot.startValue){
-        startField.value = snapshot.startValue;
-      }
-      if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
-    }else{
-      // Setup/new run: what the audience/operator sees is what Begin will use.
-      clearStoredIntercomSession();
-      sessionId = requested;
-      if(sessionId) saveIntercomSession(sessionId, value);
-    }
-
-    if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
-    return sessionId;
-  }
-
-  try{
-    const snapshot = storedSessionSnapshot();
-    const wasManagerArmed = sessionStorage.getItem(MANAGER_ARMED_KEY) === "1";
-
-    // Manager refresh must never silently rewrite the freshly generated visible
-    // Start Time. Keep stored room metadata only for an explicit Begin-time
-    // mid-show rejoin decision.
-    sessionId = null;
-    const proposed = intercomChannelForStartValue(startField && startField.value);
-    if(sessionDiag){
-      sessionDiag.textContent =
-        "Session: " + (proposed || "—") +
-        (wasManagerArmed && storedSessionIsActuallyUnderway(snapshot) ? " (rejoin available)" : " (proposed)");
-    }
-  }catch(_e){}
-
-  const set = t => {
-    if(status) status.textContent = t;
-    if(diag) diag.textContent = "Intercom — " + t;
-  };
-
-  async function registry(path="", options={}){
-    if(!sessionId) throw new Error("No intercom session");
-    const url = `${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}${path}`;
-    const response = await fetch(url, {
-      cache:"no-store",
-      ...options,
-      headers:{"Content-Type":"application/json", ...(options.headers||{})}
-    });
-    if(!response.ok) throw new Error(`Registry ${response.status}`);
-    return await response.json();
-  }
-
-  const receiverCountText = () =>
-    `${receiverIds.size} receiver${receiverIds.size === 1 ? "" : "s"} connected`;
-
-  function updateReady(){
-    if(!broadcasting){
-      set(armed ? `Broadcast ready · ${receiverCountText()}` : "Press Begin to arm intercom session");
-    }
-  }
-
-  async function registerManager(){
-    if(!sessionId || !managerInstanceId) return;
-    await registry("/manager", {
-      method:"POST",
-      body:JSON.stringify({managerInstanceId})
-    });
-  }
-
-  async function refreshRoster(){
-    if(!sessionId) return;
-    try{
-      const state = await registry("");
-      const nextIds = new Set((state.receivers || []).map(r => r.peerId));
-      receiverIds = nextIds;
-
-      if(persistentMediaReady && mediaPeer && mediaPeer.open && stream){
-        reconcilePersistentConnections();
-      }
-      updateReady();
-      if(broadcasting) set(`LIVE · ${receiverCountText()}`);
-    }catch(_e){
-      if(!broadcasting) set("Session registry reconnecting…");
-    }
-  }
-
-  function clearRosterTimers(){
-    if(heartbeatTimer) clearInterval(heartbeatTimer);
-    if(pollTimer) clearInterval(pollTimer);
-    heartbeatTimer = null;
-    pollTimer = null;
-  }
-
-  async function armManager(){
-    if(armed) return;
-    try{
-      const snapshot = storedSessionSnapshot();
-      const visibleValue = startField && startField.value;
-      const exactRejoin =
-        sessionStorage.getItem(MANAGER_ARMED_KEY) === "1" &&
-        storedSessionIsActuallyUnderway(snapshot) &&
-        snapshot.startValue === visibleValue;
-
-      if(!exactRejoin){
-        // The Manager is visibly proposing a new show. Retire the old room now.
-        sessionStorage.removeItem(MANAGER_ARMED_KEY);
-        sessionStorage.removeItem(SESSION_KEY);
-        sessionStorage.removeItem(SESSION_START_KEY);
-        sessionStorage.removeItem(POSTSHOW_COMPLETE_KEY);
-      }
-    }catch(_e){}
-    const frozen = freezeSession(startField && startField.value);
-    if(!frozen){
-      set("Manager session needs a Start Time");
-      return;
-    }
-    managerInstanceId =
-      (globalThis.crypto && typeof crypto.randomUUID === "function")
-        ? crypto.randomUUID()
-        : `mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    set("Arming manager session…");
-    try{
-      await registerManager();
-      armed = true;
-      try{ sessionStorage.setItem(MANAGER_ARMED_KEY, "1"); }catch(_e){}
-      btn.disabled = false;
-      await refreshRoster();
-      await ensurePersistentMedia();
-      reconcilePersistentConnections();
-      broadcastStateToAll();
-      clearRosterTimers();
-      heartbeatTimer = setInterval(() => registerManager().catch(()=>{}), HEARTBEAT_MS);
-      pollTimer = setInterval(refreshRoster, POLL_MS);
-      updateReady();
-    }catch(_e){
-      set("Manager registry unavailable");
-      btn.disabled = true;
-    }
-  }
-
-
-  function stopBroadcastTransportStats(){
-    if(transportStatsTimer) clearInterval(transportStatsTimer);
-    transportStatsTimer = null;
-  }
-
-  async function sampleBroadcastTransportStats(){
-    if(calls.size === 0){
-      if(transportDiag) transportDiag.textContent =
-        `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · 0 media calls`;
-      return;
-    }
-
-    let totalPacketsSent = 0, totalBytesSent = 0, remoteLost = 0;
-    let remoteReports = 0, remoteJitterSumMs = 0, remoteRttSumMs = 0, remoteRttCount = 0;
-    let pcConnected = 0;
-
-    for(const call of calls.values()){
-      const pc = call && call.peerConnection;
-      if(!pc || typeof pc.getStats !== "function") continue;
-      try{
-        const report = await pc.getStats();
-        report.forEach(stat => {
-          if(stat.type === "outbound-rtp" && stat.kind === "audio" && !stat.isRemote){
-            if(Number.isFinite(stat.packetsSent)) totalPacketsSent += stat.packetsSent;
-            if(Number.isFinite(stat.bytesSent)) totalBytesSent += stat.bytesSent;
-          }
-          if(stat.type === "remote-inbound-rtp" && stat.kind === "audio"){
-            remoteReports += 1;
-            if(Number.isFinite(stat.packetsLost)) remoteLost += stat.packetsLost;
-            if(Number.isFinite(stat.jitter)) remoteJitterSumMs += stat.jitter * 1000;
-            if(Number.isFinite(stat.roundTripTime)){
-              remoteRttSumMs += stat.roundTripTime * 1000;
-              remoteRttCount += 1;
-            }
-          }
-        });
-        if(pc.connectionState === "connected") pcConnected += 1;
-      }catch(_e){}
-    }
-
-    const avgRemoteJitter = remoteReports > 0 ? remoteJitterSumMs / remoteReports : null;
-    const avgRtt = remoteRttCount > 0 ? remoteRttSumMs / remoteRttCount : null;
-    const mb = totalBytesSent / (1024 * 1024);
-
-    if(transportDiag){
-      const stateCounts = {};
-      for(const id of receiverIds){
-        const s = mediaCallState(id).state || "unknown";
-        stateCounts[s] = (stateCounts[s] || 0) + 1;
-      }
-      const stateSummary = Object.entries(stateCounts).map(([k,v]) => `${k}:${v}`).join(" ") || "—";
-      const peerSummary = !mediaPeer ? "none" :
-        (mediaPeer.destroyed ? "destroyed" : (mediaPeer.disconnected ? "disconnected" : (mediaPeer.open ? "open" : "opening")));
-
-      transportDiag.innerHTML =
-        `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · calls ${calls.size} · ` +
-        `PC connected ${pcConnected} · sent ${totalPacketsSent} pkts / ${mb.toFixed(2)} MB<br>` +
-        `Remote reports ${remoteReports} · loss ${remoteLost} · ` +
-        `jitter ${Number.isFinite(avgRemoteJitter) ? Math.round(avgRemoteJitter) + " ms" : "—"} · ` +
-        `RTT ${Number.isFinite(avgRtt) ? Math.round(avgRtt) + " ms" : "—"}<br>` +
-        `WebRTC states ${stateSummary} · Peer ${peerSummary} · peer event ${lastPeerEvent}<br>` +
-        `Network ${networkLabel()} · network event ${lastNetworkEvent}`;
-    }
-  }
-
-  function startBroadcastTransportStats(){
-    stopBroadcastTransportStats();
-    if(transportDiag) transportDiag.textContent = "Broadcast transport — collecting…";
-    sampleBroadcastTransportStats();
-    transportStatsTimer = setInterval(sampleBroadcastTransportStats, 2000);
-  }
-
-  function sendBroadcastState(conn){
-    if(!conn || !conn.open) return;
-    try{
-      conn.send({type:"broadcast-state", active:broadcasting});
-    }catch(_e){}
-  }
-
-  function broadcastStateToAll(){
-    controls.forEach(sendBroadcastState);
-  }
-
-  function placeControl(receiverId){
-    if(!mediaPeer || !mediaPeer.open) return;
-    if(controls.has(receiverId)) return;
-
-    try{
-      const conn = mediaPeer.connect(receiverId, {reliable:true});
-      controls.set(receiverId, conn);
-
-      conn.on("open", () => sendBroadcastState(conn));
-      conn.on("close", () => controls.delete(receiverId));
-      conn.on("error", () => controls.delete(receiverId));
-    }catch(_e){}
-  }
-
-  function placeCall(receiverId){
-    if(!persistentMediaReady || !mediaPeer || !mediaPeer.open || !stream) return false;
-    if(calls.has(receiverId)) return true;
-
-    mediaCallAttempts += 1;
-
-    try{
-      const c = mediaPeer.call(receiverId, stream);
-      if(!c){
-        mediaCallCreateErrors += 1;
-        return false;
-      }
-
-      calls.set(receiverId, c);
-      callHealth.set(receiverId, {
-        createdAt: Date.now(),
-        connectedAt: null,
-        lastHealthyAt: null,
-        everHealthy: false,
-        lastState: "created"
-      });
-
-      const pc = c.peerConnection;
-      if(pc){
-        const updateState = () => {
-          const h = callHealth.get(receiverId);
-          if(!h) return;
-
-          const state = pc.connectionState || pc.iceConnectionState || "unknown";
-          h.lastState = state;
-          if(pc.connectionState === "connected" || pc.iceConnectionState === "connected" ||
-             pc.iceConnectionState === "completed"){
-            const healthyNow = Date.now();
-            if(!h.connectedAt) h.connectedAt = healthyNow;
-            h.lastHealthyAt = healthyNow;
-            h.everHealthy = true;
-          }
-        };
-
-        pc.addEventListener?.("connectionstatechange", updateState);
-        pc.addEventListener?.("iceconnectionstatechange", updateState);
-        updateState();
-      }
-
-      const retire = () => {
-        if(calls.get(receiverId) === c) calls.delete(receiverId);
-        callHealth.delete(receiverId);
-      };
-
-      c.on("close", retire);
-      c.on("error", retire);
-
-      return true;
-    }catch(_e){
-      mediaCallCreateErrors += 1;
-      return false;
-    }
-  }
-
-  function mediaCallState(receiverId){
-    const c = calls.get(receiverId);
-    if(!c) return {healthy:false, stale:false, state:"missing"};
-
-    const pc = c.peerConnection;
-    const h = callHealth.get(receiverId);
-    const now = Date.now();
-
-    const pcState = pc && pc.connectionState;
-    const iceState = pc && pc.iceConnectionState;
-
-    const healthy =
-      pcState === "connected" ||
-      iceState === "connected" ||
-      iceState === "completed";
-
-    const terminal =
-      pcState === "failed" ||
-      pcState === "closed" ||
-      iceState === "failed" ||
-      iceState === "closed";
-
-    const age = h ? now - h.createdAt : 0;
-    const everHealthy = !!(h && h.everHealthy);
-    const sinceHealthy = h && h.lastHealthyAt ? now - h.lastHealthyAt : null;
-
-    // EXPERIMENT: once a receiver has reached a genuinely healthy WebRTC state,
-    // protect that media call from transient disconnected/connecting fluctuations.
-    // Only terminal failed/closed states may retire a once-healthy call.
-    // Calls that have NEVER become healthy may still be replaced after the generous
-    // connection grace period, but only while PeerJS signaling itself is healthy.
-    const signalingReady = !!(mediaPeer && mediaPeer.open);
-    const stale = terminal || (!everHealthy && !healthy && signalingReady && age > MEDIA_CALL_CONNECT_GRACE_MS);
-
-    return {
-      healthy,
-      stale,
-      protected: everHealthy && !terminal,
-      everHealthy,
-      sinceHealthy,
-      state: pcState || iceState || (h && h.lastState) || "unknown",
-      age
-    };
-  }
-
-  function retireMediaCall(receiverId){
-    const c = calls.get(receiverId);
-    if(c){
-      try{ c.close(); }catch(_e){}
-    }
-    calls.delete(receiverId);
-    callHealth.delete(receiverId);
-  }
-
-  function placeAllPersistentConnections(){
-    receiverIds.forEach(id => {
-      if(!calls.has(id)) placeCall(id);
-      if(!controls.has(id)) placeControl(id);
-    });
-  }
-
-  function updatePersistentReadyDiagnostic(){
-    if(!transportDiag) return;
-
-    let healthy = 0;
-    let connecting = 0;
-    let protectedCalls = 0;
-    let stale = 0;
-
-    receiverIds.forEach(id => {
-      const state = mediaCallState(id);
-      if(state.healthy) healthy += 1;
-      else if(state.protected) protectedCalls += 1;
-      else if(state.stale) stale += 1;
-      else if(calls.has(id)) connecting += 1;
-    });
-
-    transportDiag.textContent =
-      `Broadcast transport — persistent · ${broadcasting ? "LIVE" : "muted"} · ` +
-      `healthy ${healthy}/${receiverIds.size} · protected ${protectedCalls} · connecting ${connecting} · ` +
-      `controls ${controls.size}/${receiverIds.size} · ` +
-      `attempts ${mediaCallAttempts} · retries ${Math.max(0, mediaCallAttempts - receiverIds.size)} · ` +
-      `create errors ${mediaCallCreateErrors}`;
-  }
-
-  function reconcilePersistentConnections(){
-    if(!persistentMediaReady || !mediaPeer || !stream) return;
-
-    // If PeerJS signaling drops, ask the existing peer to reconnect instead of
-    // abandoning the persistent media architecture. Existing WebRTC calls are
-    // left alone while signaling recovers.
-    if(!mediaPeer.open){
-      if(mediaPeer.disconnected && !mediaPeer.destroyed){
-        try{
-          lastPeerEvent = "reconnecting";
-          mediaPeer.reconnect();
-        }catch(_e){}
-      }
-      updatePersistentReadyDiagnostic();
-      return;
-    }
-
-    // Retire departed receivers and only calls that are truly stale under the protected-call experiment.
-    for(const id of Array.from(calls.keys())){
-      if(!receiverIds.has(id)){
-        retireMediaCall(id);
-        continue;
-      }
-
-      const state = mediaCallState(id);
-      if(state.stale){
-        retireMediaCall(id);
-      }
-    }
-
-    for(const [id, c] of controls){
-      if(!receiverIds.has(id)){
-        try{ c.close(); }catch(_e){}
-        controls.delete(id);
-      }
-    }
-
-    // Then fill every missing receiver again.
-    placeAllPersistentConnections();
-    updatePersistentReadyDiagnostic();
-  }
-
-  function startPersistentReconcile(){
-    if(persistentReconcileTimer) clearInterval(persistentReconcileTimer);
-    reconcilePersistentConnections();
-    persistentReconcileTimer = setInterval(reconcilePersistentConnections, 1500);
-  }
-
-  function stopPersistentReconcile(){
-    if(persistentReconcileTimer) clearInterval(persistentReconcileTimer);
-    persistentReconcileTimer = null;
-  }
-
-  function setMicEnabled(enabled){
-    if(!stream) return;
-    try{
-      stream.getAudioTracks().forEach(track => {
-        track.enabled = !!enabled;
-      });
-    }catch(_e){}
-  }
-
-  async function ensurePersistentMedia(){
-    if(persistentMediaReady && mediaPeer && mediaPeer.open && stream) return true;
-    if(persistentMediaPromise) return persistentMediaPromise;
-
-    persistentMediaPromise = (async () => {
-      try{
-        set("Preparing persistent intercom…");
-
-        if(!stream){
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
-            video:false
-          });
-        }
-
-        // Keep capture alive for the whole show, but begin logically muted.
-        setMicEnabled(false);
-
-        if(!mediaPeer || mediaPeer.destroyed){
-          mediaPeer = new Peer();
-
-          await new Promise((resolve, reject) => {
-            let settled = false;
-            const done = fn => value => {
-              if(settled) return;
-              settled = true;
-              fn(value);
-            };
-
-            mediaPeer.on("open", done(resolve));
-            mediaPeer.on("error", done(reject));
-          });
-
-          mediaPeer.on("open", () => {
-            lastPeerEvent = "open";
-            // Re-run reconciliation immediately after signaling returns so any
-            // calls that truly failed can be replaced without waiting for polling.
-            if(persistentMediaReady) reconcilePersistentConnections();
-          });
-          mediaPeer.on("disconnected", () => {
-            lastPeerEvent = "disconnected";
-            // PeerJS reconnect() restores signaling while preserving this peer ID.
-            // Do not close calls or recreate microphone/media resources here.
-            if(!mediaPeer.destroyed){
-              try{
-                lastPeerEvent = "reconnecting";
-                mediaPeer.reconnect();
-              }catch(_e){}
-            }
-          });
-          mediaPeer.on("close", () => { lastPeerEvent = "close"; });
-          mediaPeer.on("error", e => {
-            const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
-            lastPeerEvent = `error:${kind}`;
-
-            // Once persistent calls exist, signaling warnings are diagnostic-only.
-            if(calls.size > 0 && kind === "network"){
-              if(diag){
-                diag.textContent =
-                  `Intercom — ${broadcasting ? "LIVE" : "ready"} · persistent media network warning`;
-              }
-              return;
-            }
-          });
-        }
-
-        persistentMediaReady = true;
-        startPersistentReconcile();
-        startBroadcastTransportStats();
-        updateReady();
-        return true;
-      }catch(e){
-        persistentMediaReady = false;
-        set("Persistent intercom error: " + (e.message || e));
-        return false;
-      }finally{
-        persistentMediaPromise = null;
-      }
-    })();
-
-    return persistentMediaPromise;
-  }
-
-  function startBroadcast(){
-    if(!persistentMediaReady || !stream) return false;
-
-    broadcasting = true;
-    setMicEnabled(true);
-    broadcastStateToAll();
-
-    btn.textContent = "End Broadcast";
-    btn.disabled = false;
-    set(`LIVE · ${receiverCountText()}`);
-    return true;
-  }
-
-  function endBroadcast(){
-    // v6 persistent intercom: logical mute only.
-    // Do NOT stop microphone tracks, close calls, or destroy the media peer.
-    broadcasting = false;
-    setMicEnabled(false);
-    broadcastStateToAll();
-
-    btn.textContent = "Broadcast";
-    btn.disabled = !armed;
-    updateReady();
-
-    if(transportDiag){
-      transportDiag.textContent =
-        `Broadcast transport — persistent · muted · ${calls.size} media call${calls.size === 1 ? "" : "s"}`;
-    }
-  }
-
-  function teardownPersistentMedia(){
-    broadcasting = false;
-    persistentMediaReady = false;
-    persistentMediaPromise = null;
-    stopPersistentReconcile();
-
-    controls.forEach(c => { try{ c.close(); }catch(_e){} });
-    controls.clear();
-
-    calls.forEach(c => { try{ c.close(); }catch(_e){} });
-    calls.clear();
-    callHealth.clear();
-
-    if(stream){
-      try{ stream.getTracks().forEach(t => t.stop()); }catch(_e){}
-      stream = null;
-    }
-
-    if(mediaPeer){
-      try{ mediaPeer.destroy(); }catch(_e){}
-      mediaPeer = null;
-    }
-
-    stopBroadcastTransportStats();
-  }
-
-  btn.disabled = true;
-  set("Press Begin to arm intercom session");
-
-  if(begin){
-    begin.addEventListener("click", () => {
-      // Acquire/hold the iOS audio session during preshow instead of toggling it mid-show.
-      ensurePersistentMedia();
-      armManager();
-    }, {once:true, capture:true});
-  }
-
-  btn.addEventListener("click", async () => {
-    if(!armed){
-      set("Press Begin to arm intercom session");
-      return;
-    }
-
-    if(broadcasting){
-      endBroadcast();
-      return;
-    }
-
-    // If persistent media is already established, rebroadcast immediately.
-    // Do not put roster/network housekeeping on the critical button path.
-    if(persistentMediaReady && stream){
-      startBroadcast();
-      Promise.resolve(refreshRoster())
-        .then(() => reconcilePersistentConnections())
-        .catch(() => {});
-      return;
-    }
-
-    // First activation may still need to acquire/prepare persistent media.
-    btn.disabled = true;
-    const ready = await ensurePersistentMedia();
-    if(!ready){
-      btn.disabled = false;
-      btn.textContent = "Broadcast";
-      return;
-    }
-
-    // Open the gate as soon as media is ready; roster refresh is background-only.
-    startBroadcast();
-    Promise.resolve(refreshRoster())
-      .then(() => reconcilePersistentConnections())
-      .catch(() => {});
-  });
-
-  window.addEventListener("online", () => { lastNetworkEvent = "online"; sampleBroadcastTransportStats(); });
-  window.addEventListener("offline", () => { lastNetworkEvent = "offline"; sampleBroadcastTransportStats(); });
-  if(networkConnection && typeof networkConnection.addEventListener === "function"){
-    networkConnection.addEventListener("change", () => {
-      lastNetworkEvent = `change:${networkLabel()}`;
-      sampleBroadcastTransportStats();
-    });
-  }
-
-  window.addEventListener("pagehide", () => {
-    clearRosterTimers();
-    teardownPersistentMedia();
-  });
+ 'use strict';
+ const TOKEN_SERVICE='https://REPLACE-WITH-YOUR-V9-TOKEN-WORKER.workers.dev';
+ const lk=window.LivekitClient;
+ const output=document.getElementById('v9ChannelDiagnostics');
+ const sessionView=document.getElementById('intercomSessionDiagnostics');
+ const begin=document.getElementById('playButton');
+ const field=document.getElementById('startTime');
+ const buttons={audience:document.getElementById('v9AudiencePtt'),managers:document.getElementById('v9ManagersPtt')};
+ const labels={audience:document.getElementById('v9AudienceStatus'),managers:document.getElementById('v9ManagersStatus')};
+ const rooms={audience:null,managers:null};
+ const received={audience:new Map(),managers:new Map()};
+ const remoteAudio=new Map();
+ const backbone=document.getElementById('audio');
+ const MAX_TALK_MS=60000;
+ let sessionId=null, passphrase='',active=null, holdToken=0, holding=false, cutoff=null;
+ let baseline=null, fadeFrame=null, ducked=false;
+ let connecting=false;
+ const status=(k,message)=>{if(labels[k])labels[k].textContent=message;};
+ const say=message=>{if(output)output.textContent=message;window.commonV9Diag?.set('connection',message);};
+ const session=()=>{const s=String(field?.value||'').replace(/[^0-9A-Za-z]/g,'');return s?'common-v6-'+s:null;};
+ const installed=()=>!!(lk&&!TOKEN_SERVICE.includes('REPLACE-WITH'));
+ function duck(){
+   const requested=active!==null||received.audience.size>0||received.managers.size>0;
+   if(!backbone)return;
+   if(requested===ducked)return;
+   ducked=requested;
+   window.commonV9Diag?.set('ducking',ducked?'25%':'100%');
+   window.commonV9Diag?.set('reason',active==='audience'?'Audience Broadcast':active==='managers'?'Manager Intercom':received.audience.size?'Audience Broadcast':received.managers.size?'Manager Intercom':'None');
+   if(ducked)baseline=backbone.volume;
+   const target=ducked?Math.min(1,baseline*0.25):(baseline??backbone.volume);
+   const start=backbone.volume,started=performance.now(),duration=ducked?200:500;
+   if(fadeFrame!==null)cancelAnimationFrame(fadeFrame);
+   function step(now){
+     const t=Math.min(1,(now-started)/duration);
+     backbone.volume=start+(target-start)*t;
+     fadeFrame=t<1?requestAnimationFrame(step):null;
+   }
+   fadeFrame=requestAnimationFrame(step);
+ }
+ const keyFor=(kind,participant,pub)=>kind+':'+participant.identity+':'+pub.trackSid;
+ function updateRemote(kind,person,pub,unmuted){
+   if(!pub||pub.kind!=='audio'||!person)return;
+   const key=keyFor(kind,person,pub);
+   if(unmuted)received[kind].set(key,true);else received[kind].delete(key);
+   window.commonV9Diag?.set(kind,unmuted?'Receiving':'Idle');
+   window.commonV9Diag?.set('broadcaster',unmuted?person.identity:'—');
+   if(unmuted)window.commonV9Diag?.begin(kind);else window.commonV9Diag?.end(kind);
+   duck();
+ }
+ function attachRoom(kind,room){
+   room.on(lk.RoomEvent.TrackSubscribed,(track,pub,person)=>{
+     if(track.kind!=='audio')return;
+     const element=track.attach();element.autoplay=true;element.playsInline=true;
+     document.body.appendChild(element);
+     remoteAudio.set(keyFor(kind,person,pub),element);
+     updateRemote(kind,person,pub,!pub.isMuted);
+     element.play()?.catch(()=>status(kind,'Tap Begin to allow intercom audio'));
+   });
+   room.on(lk.RoomEvent.TrackMuted,(pub,person)=>updateRemote(kind,person,pub,false));
+   room.on(lk.RoomEvent.TrackUnmuted,(pub,person)=>updateRemote(kind,person,pub,true));
+   room.on(lk.RoomEvent.TrackUnsubscribed,(track,pub,person)=>{
+     track.detach().forEach(el=>el.remove());
+     if(person) {remoteAudio.delete(keyFor(kind,person,pub));updateRemote(kind,person,pub,false);}
+   });
+   room.on(lk.RoomEvent.ParticipantDisconnected,person=>{
+     for(const key of received[kind].keys())if(key.startsWith(kind+':'+person.identity+':'))received[kind].delete(key);
+     duck();
+   });
+   room.on(lk.RoomEvent.Disconnected,()=>{
+     received[kind].clear();
+     buttons[kind].disabled=true;
+     status(kind,'Disconnected — reconnect required');window.commonV9Diag?.set('connection','Disconnected');window.commonV9Diag?.event(kind+' room disconnected');
+     if(active===kind)void stop('Disconnected');
+     duck();
+   });
+ }
+ async function credentials(kind){
+   const r=await fetch(TOKEN_SERVICE+'/api/livekit/token',{
+     method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({sessionId,kind,passphrase})
+   });
+   const data=await r.json();if(!r.ok)throw Error(data.error||'Token request failed');return data;
+ }
+ async function connect(kind){
+   const config=await credentials(kind==='audience'?'audience-manager':'managers-manager');
+   const room=new lk.Room({autoSubscribe:true,adaptiveStream:false});
+   attachRoom(kind,room);
+   await room.connect(config.url,config.token);
+   rooms[kind]=room;
+   buttons[kind].disabled=false;
+   status(kind,'Connected · hold to transmit');window.commonV9Diag?.set('connection','Connected');window.commonV9Diag?.set('room','Audience + Managers');window.commonV9Diag?.event(kind+' room connected');
+ }
+ async function stop(reason='Connected · hold to transmit'){
+   ++holdToken;
+   holding=false;
+   if(cutoff!==null)clearTimeout(cutoff);cutoff=null;
+   const kind=active;active=null;
+   if(!kind)return;
+   window.commonV9Diag?.set(kind,'Idle');window.commonV9Diag?.end(kind);
+   buttons[kind].classList.remove('transmitting');
+   duck();
+   status(kind,reason);
+   try{await rooms[kind]?.localParticipant.setMicrophoneEnabled(false);}catch(_e){}
+ }
+ async function start(kind){
+   if(active||!rooms[kind]||rooms[kind].state!=='connected')return;
+   const token=++holdToken;
+   active=kind;holding=true;
+   buttons[kind].classList.add('transmitting');
+   status(kind,'Opening microphone…');
+   cutoff=setTimeout(()=>{if(active===kind&&holdToken===token)void stop('60-second safety cutoff · release to retry');},MAX_TALK_MS);
+   try{
+     await rooms[kind].localParticipant.setMicrophoneEnabled(true);
+     // A finger may have released while getUserMedia was awaiting permission.
+     if(token!==holdToken||!holding||active!==kind){
+       await rooms[kind].localParticipant.setMicrophoneEnabled(false);
+       return;
+     }
+     duck();
+     status(kind,kind==='audience'?'LIVE · audience':'LIVE · managers only');window.commonV9Diag?.set(kind,'Transmitting');window.commonV9Diag?.begin(kind);
+   }catch(err){window.commonV9Diag?.set('error',err?.message||err);status(kind,'Mic unavailable: '+(err?.message||err));await stop('Microphone unavailable');}
+ }
+ async function connectBoth(){
+   if(connecting)return;
+   const next=session();if(!next)return;
+   if(!installed()){say('Configure token service to enable live communications');return;}
+   if(!passphrase)passphrase=window.prompt('Common V9 manager passphrase (not stored)')||'';
+   if(!passphrase)return;
+   connecting=true;
+   try{
+     await stop();
+     for(const k of ['audience','managers']){
+       buttons[k].disabled=true;
+       if(rooms[k]){await rooms[k].disconnect();rooms[k]=null;}
+       received[k].clear();
+     }
+     sessionId=next;
+     sessionView.textContent='Session: '+sessionId;
+     for(const k of ['audience','managers']){
+       try{await connect(k);}catch(err){status(k,'Connection error: '+(err?.message||err));}
+     }
+     say('Live communications isolated from the show clock');
+   }finally{connecting=false;duck();}
+ }
+ for(const kind of ['audience','managers']){
+   const b=buttons[kind];b.disabled=true;
+   b.addEventListener('pointerdown',event=>{
+     if(b.disabled||active)return;
+     event.preventDefault();b.setPointerCapture(event.pointerId);
+     void start(kind);
+   });
+   for(const name of ['pointerup','pointercancel','lostpointercapture'])
+     b.addEventListener(name,()=>{if(active===kind)void stop();});
+   b.addEventListener('click',event=>event.preventDefault());
+ }
+ begin?.addEventListener('click',()=>void connectBoth());
+ field?.addEventListener('change',()=>{void stop('Session changed');for(const room of Object.values(rooms))room?.disconnect();});
+ document.addEventListener('visibilitychange',()=>{if(document.hidden)void stop('Backgrounded · microphone off');});
+ window.addEventListener('pagehide',()=>{void stop('Page closed');for(const room of Object.values(rooms))room?.disconnect();});
+ say('LiveKit token service not configured; push-to-talk disabled');
 })();
 </script>
-
-</body>
-</html>
+<script>
+/* V9 lightweight local diagnostics; observer only, never changes playback. */
+(()=>{
+ 'use strict';
+ const health=document.getElementById('v9AudioHealth');
+ const events=document.getElementById('v9AudioEvents');
+ const panel=document.getElementById('diagnosticsPanel');
+ const history=[];
+ const fields={connection:'Not connected',room:'—',audience:'Idle',managers:'Idle',broadcaster:'—',ducking:'100%',reason:'None',last:'—',error:'—',overlay:'—',quality:'Not measured'};
+ let lastStart=null;
+ const stamp=()=>new Date().toLocaleTimeString();
+ function draw(){
+  if(panel?.classList.contains('hidden'))return;
+  health.textContent='V9 audio · '+fields.connection+' | Room: '+fields.room+' | Audience: '+fields.audience+' | Managers: '+fields.managers+' | From: '+fields.broadcaster+' | Duck: '+fields.ducking+' ('+fields.reason+') | Last: '+fields.last+' | Quality: '+fields.quality+' | Error: '+fields.error+' | Overlay: '+fields.overlay;
+  events.textContent='Recent audio events (local):\n'+(history.length?history.map(e=>e.time+'  '+e.message).join('\n'):'None');
+ }
+ window.commonV9Diag={
+  set(key,value){if(Object.hasOwn(fields,key)){fields[key]=String(value);draw();}},
+  event(message){history.push({time:stamp(),message:String(message).slice(0,180)});if(history.length>20)history.shift();draw();},
+  begin(kind){lastStart={kind,time:performance.now()};this.event(kind+' broadcast started');},
+  end(kind){if(lastStart?.kind===kind){fields.last=kind+' '+((performance.now()-lastStart.time)/1000).toFixed(1)+'s';lastStart=null;}this.event(kind+' broadcast ended');draw();}
+ };
+ panel?.addEventListener('transitionend',draw);
+ document.getElementById('diagnosticsToggle')?.addEventListener('click',()=>queueMicrotask(draw));
+ draw();
+})();
+</script>
+</body></html>
