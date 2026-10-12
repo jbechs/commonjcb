@@ -2720,7 +2720,7 @@
 /* Common V9 PTT: microphone mute state controls ducking; transport never controls show clock. */
 (() => {
  'use strict';
- const TOKEN_SERVICE='https://REPLACE-WITH-YOUR-V9-TOKEN-WORKER.workers.dev';
+ const TOKEN_SERVICE='https://common-v9-livekit-token.jbechs.workers.dev';
  const lk=window.LivekitClient;
  const output=document.getElementById('v9ChannelDiagnostics');
  const sessionView=document.getElementById('intercomSessionDiagnostics');
@@ -2738,7 +2738,7 @@
  let connecting=false;
  const status=(k,message)=>{if(labels[k])labels[k].textContent=message;};
  const say=message=>{if(output)output.textContent=message;window.commonV9Diag?.set('connection',message);};
- const session=()=>{const s=String(field?.value||'').replace(/[^0-9A-Za-z]/g,'');return s?'common-v6-'+s:null;};
+ const session=()=>{const value=field?.value||'';return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)?'common-v6-'+value.replace(/[-:]/g,''):null;};
  const installed=()=>!!(lk&&!TOKEN_SERVICE.includes('REPLACE-WITH'));
  function duck(){
    const requested=active!==null||received.audience.size>0||received.managers.size>0;
@@ -2878,7 +2878,7 @@
  field?.addEventListener('change',()=>{void stop('Session changed');for(const room of Object.values(rooms))room?.disconnect();});
  document.addEventListener('visibilitychange',()=>{if(document.hidden)void stop('Backgrounded · microphone off');});
  window.addEventListener('pagehide',()=>{void stop('Page closed');for(const room of Object.values(rooms))room?.disconnect();});
- say('LiveKit token service not configured; push-to-talk disabled');
+ say('LiveKit service configured; awaiting Manager session start');
 })();
 </script>
 <script>
