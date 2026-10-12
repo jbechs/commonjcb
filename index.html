@@ -2734,7 +2734,7 @@
  const backbone=document.getElementById('audio');
  const MAX_TALK_MS=60000;
  let sessionId=null, passphrase='',active=null, holdToken=0, holding=false, cutoff=null;
- let baseline=null, fadeFrame=null, ducked=false;
+ let baseline=null, fadeFrame=null, fadeFallback=null, ducked=false;
  let connecting=false;
  const status=(k,message)=>{if(labels[k])labels[k].textContent=message;};
  const say=message=>{if(output)output.textContent=message;window.commonV9Diag?.set('connection',message);};
@@ -2748,15 +2748,28 @@
    window.commonV9Diag?.set('ducking',ducked?'10%':'100%');
    window.commonV9Diag?.set('reason',active==='audience'?'Audience Broadcast':active==='managers'?'Manager Intercom':received.audience.size?'Audience Broadcast':received.managers.size?'Manager Intercom':'None');
    if(ducked)baseline=backbone.volume;
-   const target=ducked?Math.min(1,baseline*0.10):(baseline??backbone.volume);
+   const target=ducked?Math.min(1,(baseline??backbone.volume)*0.10):(baseline??backbone.volume);
    const start=backbone.volume,started=performance.now(),duration=ducked?200:500;
    if(fadeFrame!==null)cancelAnimationFrame(fadeFrame);
+   if(fadeFallback!==null)clearTimeout(fadeFallback);
+   const targetDucked=ducked;
+   function finish(){
+     // iOS microphone permission can suspend animation frames; finish the fade
+     // even if the browser never delivers its final animation frame.
+     if(ducked!==targetDucked)return;
+     if(fadeFrame!==null)cancelAnimationFrame(fadeFrame);
+     fadeFrame=null;
+     backbone.volume=target;
+   }
    function step(now){
+     if(ducked!==targetDucked)return;
      const t=Math.min(1,(now-started)/duration);
      backbone.volume=start+(target-start)*t;
-     fadeFrame=t<1?requestAnimationFrame(step):null;
+     if(t<1)fadeFrame=requestAnimationFrame(step);
+     else {fadeFrame=null; if(fadeFallback!==null){clearTimeout(fadeFallback);fadeFallback=null;}}
    }
    fadeFrame=requestAnimationFrame(step);
+   fadeFallback=setTimeout(()=>{fadeFallback=null;finish();},duration+150);
  }
  const keyFor=(kind,participant,pub)=>kind+':'+participant.identity+':'+pub.trackSid;
  // The remote-state map is an event cache, not the authority. Rebuild from
