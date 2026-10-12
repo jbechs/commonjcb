@@ -2759,6 +2759,25 @@
    fadeFrame=requestAnimationFrame(step);
  }
  const keyFor=(kind,participant,pub)=>kind+':'+participant.identity+':'+pub.trackSid;
+ // The remote-state map is an event cache, not the authority. Rebuild from
+ // LiveKit's current publications so a missed mute/unsubscribe event cannot
+ // leave a manager permanently ducked after their own PTT is released.
+ function reconcileRemote(){
+   for(const kind of ['audience','managers']){
+     const current=new Map();
+     const room=rooms[kind];
+     if(room?.state==='connected'){
+       for(const person of room.remoteParticipants.values()){
+         for(const pub of person.trackPublications.values()){
+           if(pub.kind==='audio'&&!pub.isMuted)
+             current.set(keyFor(kind,person,pub),true);
+         }
+       }
+     }
+     received[kind]=current;
+   }
+ }
+
  function updateRemote(kind,person,pub,unmuted){
    if(!pub||pub.kind!=='audio'||!person)return;
    const key=keyFor(kind,person,pub);
@@ -2786,6 +2805,7 @@
    });
    room.on(lk.RoomEvent.ParticipantDisconnected,person=>{
      for(const key of received[kind].keys())if(key.startsWith(kind+':'+person.identity+':'))received[kind].delete(key);
+     reconcileRemote();
      duck();
    });
    room.on(lk.RoomEvent.Disconnected,()=>{
@@ -2821,9 +2841,14 @@
    if(!kind)return;
    window.commonV9Diag?.set(kind,'Idle');window.commonV9Diag?.end(kind);
    buttons[kind].classList.remove('transmitting');
+   reconcileRemote();
    duck();
    status(kind,reason);
    try{await rooms[kind]?.localParticipant.setMicrophoneEnabled(false);}catch(_e){}
+   // Check again after LiveKit has propagated the microphone mute.
+   // This changes volume only; it never changes show timing or playback.
+   reconcileRemote();
+   duck();
  }
  async function start(kind){
    if(active||!rooms[kind]||rooms[kind].state!=='connected')return;
