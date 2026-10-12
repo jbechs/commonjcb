@@ -2745,10 +2745,10 @@
    if(!backbone)return;
    if(requested===ducked)return;
    ducked=requested;
-   window.commonV9Diag?.set('ducking',ducked?'25%':'100%');
+   window.commonV9Diag?.set('ducking',ducked?'10%':'100%');
    window.commonV9Diag?.set('reason',active==='audience'?'Audience Broadcast':active==='managers'?'Manager Intercom':received.audience.size?'Audience Broadcast':received.managers.size?'Manager Intercom':'None');
    if(ducked)baseline=backbone.volume;
-   const target=ducked?Math.min(1,baseline*0.25):(baseline??backbone.volume);
+   const target=ducked?Math.min(1,baseline*0.10):(baseline??backbone.volume);
    const start=backbone.volume,started=performance.now(),duration=ducked?200:500;
    if(fadeFrame!==null)cancelAnimationFrame(fadeFrame);
    function step(now){
@@ -2777,6 +2777,7 @@
      updateRemote(kind,person,pub,!pub.isMuted);
      element.play()?.catch(()=>status(kind,'Tap Begin to allow intercom audio'));
    });
+   room.on(lk.RoomEvent.TrackPublished,(pub,person)=>updateRemote(kind,person,pub,!pub.isMuted));
    room.on(lk.RoomEvent.TrackMuted,(pub,person)=>updateRemote(kind,person,pub,false));
    room.on(lk.RoomEvent.TrackUnmuted,(pub,person)=>updateRemote(kind,person,pub,true));
    room.on(lk.RoomEvent.TrackUnsubscribed,(track,pub,person)=>{
@@ -2807,6 +2808,7 @@
    const room=new lk.Room({autoSubscribe:true,adaptiveStream:false});
    attachRoom(kind,room);
    await room.connect(config.url,config.token);
+   for(const person of room.remoteParticipants.values())for(const pub of person.trackPublications.values())updateRemote(kind,person,pub,!pub.isMuted);
    rooms[kind]=room;
    buttons[kind].disabled=false;
    status(kind,'Connected · hold to transmit');window.commonV9Diag?.set('connection','Connected');window.commonV9Diag?.set('room','Audience + Managers');window.commonV9Diag?.event(kind+' room connected');
@@ -2828,6 +2830,7 @@
    const token=++holdToken;
    active=kind;holding=true;
    buttons[kind].classList.add('transmitting');
+   duck();
    status(kind,'Opening microphone…');
    cutoff=setTimeout(()=>{if(active===kind&&holdToken===token)void stop('60-second safety cutoff · release to retry');},MAX_TALK_MS);
    try{
