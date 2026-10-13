@@ -1184,66 +1184,69 @@
       updateDriftStats();
     }
 
+    // V9 Manager clock startup safeguard: bound every network attempt so Safari
+    // cannot remain indefinitely at "Syncing clock…". Never use the local device
+    // clock silently as a substitute for a verified server offset.
     async function syncServerClock(samples = 5){
+      const CLOCK_REQUEST_TIMEOUT_MS = 2000;
       let bestSample = null;
+      let lastError = "No response";
 
       for(let i = 0; i < samples; i++){
+        const controller = new AbortController();
+        let timeoutId;
         try{
           const t0 = highResNowMs();
-
-          const response = await fetch(TIME_SERVER_URL, {
-            cache: "no-store"
-          });
-
-          if(!response.ok){
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const data = await response.json();
+          // The Promise.race is intentional: a browser may not settle fetch
+          // promptly even after an abort during a network transition.
+          const data = await Promise.race([
+            (async()=>{
+              const response = await fetch(TIME_SERVER_URL, {
+                cache: "no-store",
+                signal: controller.signal
+              });
+              if(!response.ok) throw new Error(`HTTP ${response.status}`);
+              return await response.json();
+            })(),
+            new Promise((_, reject)=>{
+              timeoutId = setTimeout(()=>{
+                controller.abort();
+                reject(new Error("Clock request timed out"));
+              }, CLOCK_REQUEST_TIMEOUT_MS);
+            })
+          ]);
           const t1 = highResNowMs();
-
-          if(typeof data.now !== "number"){
+          if(typeof data?.now !== "number" || !Number.isFinite(data.now)){
             throw new Error("Bad time response");
           }
-
           const roundTripMs = t1 - t0;
-          const estimatedServerNow = data.now + (roundTripMs / 2);
-          const offsetMs = estimatedServerNow - t1;
-
-          const sample = {
-            offsetMs,
-            roundTripMs
-          };
-
-          if(!bestSample || sample.roundTripMs < bestSample.roundTripMs){
-            bestSample = sample;
+          const offsetMs = (data.now + roundTripMs / 2) - t1;
+          if(!bestSample || roundTripMs < bestSample.roundTripMs){
+            bestSample = {offsetMs, roundTripMs};
           }
         }catch(err){
-          if(i === samples - 1 && !bestSample){
-            serverClockOffsetMs = 0;
-            lastClockSyncDebug = `Clock sync failed: ${err.message}`;
-            setDebug(lastClockSyncDebug);
-            return false;
-          }
+          lastError = String(err?.message || err);
+          // A single failed request should not invalidate a valid earlier sample.
+        }finally{
+          clearTimeout(timeoutId);
+          controller.abort();
         }
-
-        await new Promise(resolve => setTimeout(resolve, 80));
+        if(i < samples - 1) await new Promise(resolve => setTimeout(resolve, 80));
       }
 
-      if(bestSample){
-        serverClockOffsetMs = bestSample.offsetMs;
-
-        lastClockSyncDebug =
-          `Clock offset ${Math.round(serverClockOffsetMs)} ms · RTT ${Math.round(bestSample.roundTripMs)} ms`;
-
+      if(!bestSample){
+        lastClockSyncDebug = `Clock sync unavailable after ${samples} bounded attempts: ${lastError}`;
         setDebug(lastClockSyncDebug);
-        return true;
+        // The existing preparation handler retries once, then presents a
+        // clear retry action rather than proceeding with an unverified clock.
+        throw new Error(lastClockSyncDebug);
       }
 
-      serverClockOffsetMs = 0;
-      lastClockSyncDebug = "Clock sync unavailable; using device clock.";
+      serverClockOffsetMs = bestSample.offsetMs;
+      lastClockSyncDebug =
+        `Clock offset ${Math.round(serverClockOffsetMs)} ms · RTT ${Math.round(bestSample.roundTripMs)} ms`;
       setDebug(lastClockSyncDebug);
-      return false;
+      return true;
     }
 
     function clearPreparationStatusTimer(){
