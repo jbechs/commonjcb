@@ -620,6 +620,9 @@
     let startupObservedCorrectionBiasSec = null;
     let startupObservedCorrectionSamplesMs = [];
     let seekSettlingToken = 0;
+    // Diagnostic-only: the most recent hard seek's short settling trace.
+    // Never used to make playback, seek, or ducking decisions.
+    let seekMicroTrace = null;
     let residualFollowupAttempted = false;
     let residualFollowupStatus = "not evaluated";
     let samplesUnder150 = 0;
@@ -1127,6 +1130,15 @@
         settlingText = `immediate ${formatSignedMs(lastSeekAfterSec)} · 1s ${formatSignedMs(lastSeekAfter1Sec)} · 3s ${formatSignedMs(lastSeekAfter3Sec)}`;
       }
 
+      const traceText = seekMicroTrace
+        ? `Seek trace (read-only): target ${seekMicroTrace.targetMs} ms · request expected ${seekMicroTrace.expectedMs} ms · ` +
+          `assigned ${seekMicroTrace.assignedMs} ms · seeked ${seekMicroTrace.seekedMs ?? "—"} ms · ` +
+          `latency ${seekMicroTrace.seekLatencyMs ?? "—"} ms<br>` +
+          (seekMicroTrace.samples.length
+            ? seekMicroTrace.samples.map(s => `${s.label}: drift ${s.driftMs} ms, media ${s.mediaMs} ms, expected ${s.expectedMs} ms, Δmedia ${s.mediaAdvanceMs} ms, Δclock ${s.clockAdvanceMs} ms`).join("<br>")
+            : "Awaiting post-seek samples")
+        : "No seek trace yet";
+
       driftStatsEl.innerHTML =
         `Initial ${formatSignedMs(initialDriftSec)} · Avg ${avgAbsSec == null ? "—" : `${Math.round(avgAbsSec * 1000)} ms`} · ` +
         `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
@@ -1139,7 +1151,7 @@
         `Recovery bias: ${lastRecoveryBiasSec == null ? "—" : formatSignedMs(lastRecoveryBiasSec)} (${lastRecoveryBiasMode})<br>` +
         `Startup plateau: ${startupObservedCorrectionState}${startupObservedCorrectionBiasSec == null ? "" : ` · bias ${formatSignedMs(startupObservedCorrectionBiasSec)}`}<br>` +
         `Startup samples: ${startupObservedCorrectionSamplesMs.length ? startupObservedCorrectionSamplesMs.join(", ") + " ms" : "—"}<br>` +
-        `Post-seek settling: ${settlingText}`;
+        `Post-seek settling: ${settlingText}<br>${traceText}`;
     }
 
     function resetDriftStats(){
@@ -1867,8 +1879,45 @@
       const bufferedEnd = getBufferedEndFor(recoveryTarget);
 
       if(bufferedEnd > recoveryTarget + 1){
+        // Capture a monotonic timestamp and both clocks BEFORE the seek.
+        // Tracing only: never feeds into the correction target.
+        const seekRequestedAt = highResNowMs();
+        const seekExpectedAtRequest = expected;
         audio.currentTime = recoveryTarget;
+        const seekAssignedMedia = audio.currentTime;
         await waitForSeek();
+        const seekCompletedAt = highResNowMs();
+
+        seekMicroTrace = {
+          targetMs: Math.round(recoveryTarget * 1000),
+          expectedMs: Math.round(seekExpectedAtRequest * 1000),
+          assignedMs: Math.round(seekAssignedMedia * 1000),
+          seekedMs: Math.round(audio.currentTime * 1000),
+          seekLatencyMs: Math.round(seekCompletedAt - seekRequestedAt),
+          samples: []
+        };
+        const thisTrace = seekMicroTrace;
+        const traceBaseMedia = audio.currentTime;
+        const traceBaseExpected = getExpectedTrackTimeSec();
+        // Use inexpensive, one-shot timers; no high-frequency polling.
+        function recordSeekTrace(label){
+          if(seekMicroTrace !== thisTrace || audio.paused || audio.ended) return;
+          const media = audio.currentTime;
+          const master = getExpectedTrackTimeSec();
+          if(!Number.isFinite(master)) return;
+          thisTrace.samples.push({
+            label, driftMs: Math.round((master - media) * 1000),
+            mediaMs: Math.round(media * 1000),
+            expectedMs: Math.round(master * 1000),
+            mediaAdvanceMs: Math.round((media - traceBaseMedia) * 1000),
+            clockAdvanceMs: Math.round((master - traceBaseExpected) * 1000)
+          });
+          updateDriftStats();
+        }
+        recordSeekTrace("0ms");
+        for(const delay of [50, 100, 200, 500]){
+          setTimeout(()=>recordSeekTrace(`${delay}ms`), delay);
+        }
 
         lastDriftSec = getCurrentDriftSec();
         hardSeekCount += 1;
