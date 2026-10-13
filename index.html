@@ -1737,12 +1737,9 @@
     }
 
     function getRecoveryMediaTargetSec(expectedSec, preSeekDriftSec){
-      // v4.6–v4.98:
-      // outputLatency remains diagnostic only. For the FIRST correction within
-      // the startup-settling window, use the drift we actually observed as a
-      // one-shot empirical lead/lag estimate. Later corrections go straight to
-      // the canonical media position and let the existing bounded controller
-      // decide whether another intervention is warranted.
+      // V9 EXPERIMENT: outputLatency remains diagnostic only. All hard seeks,
+      // including the first startup correction, aim at the canonical media
+      // position. Preserve the original one-shot follow-up as a fallback.
       const msSincePlaying =
         latestStartTiming && latestStartTiming.playingEventAtMs != null
           ? highResNowMs() - latestStartTiming.playingEventAtMs
@@ -1753,16 +1750,17 @@
         msSincePlaying <= STARTUP_SETTLING_RECOVERY_WINDOW_MS &&
         Number.isFinite(preSeekDriftSec);
 
-      const recoveryBiasSec = useObservedStartupBias
-        ? clampObservedRecoveryBiasSec(preSeekDriftSec)
-        : 0;
-
+      // V9 EXPERIMENT: do not apply an observed startup bias to hard seeks.
+      // Preserve the observation and bounded follow-up logic, but seek to the
+      // canonical timeline on the FIRST attempt as well as later attempts.
+      // This changes only the Manager's recovery target, not the shared clock.
+      const recoveryBiasSec = 0;
       lastRecoveryBiasSec = recoveryBiasSec;
       lastRecoveryBiasMode = useObservedStartupBias
-        ? "observed startup drift"
+        ? "TEST: first correction canonical (startup bias bypassed)"
         : "canonical target";
 
-      return expectedSec + recoveryBiasSec;
+      return expectedSec;
     }
 
     function scheduleObservedStartupCorrection(op){
@@ -1836,7 +1834,7 @@
           );
           startupObservedCorrectionBiasSec = conservativeCorrectionSec;
           startupObservedCorrectionState =
-            `stable ${formatSignedMs(plateauSec)} — applying 100% ${formatSignedMs(conservativeCorrectionSec)}`;
+            `TEST: stable ${formatSignedMs(plateauSec)} — canonical seek; observed bias ignored`;
           updateDriftStats();
 
           // Consume this observation exactly once. We correct only the device/run
@@ -1844,13 +1842,13 @@
           startupObservationToken += 1;
 
           const corrected = await hardSyncToExpectedTime(
-            `v4.98 startup correction: 100% of settled drift (${Math.round(conservativeCorrectionSec * 1000)} of ${Math.round(plateauSec * 1000)} ms)`,
+            `TEST: canonical startup correction (observed ${Math.round(plateauSec * 1000)} ms; no seek bias)`,
             conservativeCorrectionSec
           );
 
           startupObservedCorrectionState = corrected
-            ? `corrected 100%: plateau ${formatSignedMs(plateauSec)} → applied ${formatSignedMs(conservativeCorrectionSec)}`
-            : `stable ${formatSignedMs(plateauSec)} — 100% correction deferred`;
+            ? `TEST: plateau ${formatSignedMs(plateauSec)} → canonical seek (startup bias bypassed)`
+            : `TEST: plateau ${formatSignedMs(plateauSec)} — canonical seek deferred`;
           updateDriftStats();
         }, delay);
       });
