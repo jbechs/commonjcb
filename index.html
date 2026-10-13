@@ -620,6 +620,8 @@
     let startupObservedCorrectionBiasSec = null;
     let startupObservedCorrectionSamplesMs = [];
     let seekSettlingToken = 0;
+    let residualFollowupAttempted = false;
+    let residualFollowupStatus = "not evaluated";
     let samplesUnder150 = 0;
     let samplesUnder250 = 0;
     let samplesUnderThreshold = 0;
@@ -734,6 +736,11 @@
     // residual on the current Android speaker/headphone paths.
     const STARTUP_OBSERVED_CORRECTION_FACTOR = 1.00;
     const POST_SEEK_SETTLING_GRACE_MS = 1500;
+    // TEST ONLY: one canonical follow-up for a stable residual left below
+    // the normal 420 ms hard-seek threshold by the FIRST correction.
+    const RESIDUAL_TEST_MIN_SEC = 0.25;
+    const RESIDUAL_TEST_MAX_SEC = HARD_SEEK_TRIGGER_SEC;
+    const RESIDUAL_TEST_MAX_SPREAD_SEC = 0.06;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -1155,6 +1162,8 @@
       startupObservedCorrectionBiasSec = null;
       startupObservedCorrectionSamplesMs = [];
       seekSettlingToken += 1;
+      residualFollowupAttempted = false;
+      residualFollowupStatus = "not evaluated";
       samplesUnder150 = 0;
       samplesUnder250 = 0;
       samplesUnderThreshold = 0;
@@ -1882,10 +1891,42 @@
           updateDriftStats();
         }, 1000);
 
-        setTimeout(()=>{
+        setTimeout(async ()=>{
           if(thisSeekToken !== seekSettlingToken || audio.paused || audio.ended) return;
           lastSeekAfter3Sec = getCurrentDriftSec();
           updateDriftStats();
+
+          // Experimental one-shot rescue, only after the first hard seek.
+          // Demand a stable same-sign residual at 1 s and 3 s; do NOT
+          // seek on an isolated reading, and do not start another loop.
+          if(hardSeekCount !== 1 || residualFollowupAttempted) return;
+          const a = lastSeekAfter1Sec;
+          const b = lastSeekAfter3Sec;
+          if(!Number.isFinite(a) || !Number.isFinite(b)){
+            residualFollowupStatus = "skipped: missing settling sample";
+            return;
+          }
+          const stable = Math.sign(a) === Math.sign(b) &&
+            Math.abs(a - b) <= RESIDUAL_TEST_MAX_SPREAD_SEC;
+          const inBand = Math.abs(a) >= RESIDUAL_TEST_MIN_SEC &&
+            Math.abs(b) >= RESIDUAL_TEST_MIN_SEC &&
+            Math.abs(a) < RESIDUAL_TEST_MAX_SEC &&
+            Math.abs(b) < RESIDUAL_TEST_MAX_SEC;
+          if(!stable || !inBand){
+            residualFollowupStatus = `skipped: 1s ${Math.round(a*1000)} ms, 3s ${Math.round(b*1000)} ms`;
+            setDebug(`Residual test: ${residualFollowupStatus}`);
+            return;
+          }
+          residualFollowupAttempted = true;
+          residualFollowupStatus = `attempting canonical follow-up after ${Math.round(b*1000)} ms residual`;
+          setDebug(`Residual test: ${residualFollowupStatus}`);
+          // Passing null disables the observed startup-bias path because
+          // hardSeekCount is already 1. Use the canonical clock position.
+          const corrected = await hardSyncToExpectedTime(
+            `TEST: one-shot residual follow-up (${Math.round(b*1000)} ms)`, null
+          );
+          residualFollowupStatus = corrected ? "follow-up seek completed" : "follow-up skipped (not buffered)";
+          setDebug(`Residual test: ${residualFollowupStatus}`);
         }, 3000);
 
         setStatus(reason);
